@@ -24,7 +24,7 @@ import UIKit
 import os.lock
 
 // MARK: - Linked Map Node
-fileprivate final class LinkedListNode<Key: Hashable, Value>: @unchecked Sendable {
+fileprivate final class LinkedListNode<Key: Hashable & Sendable, Value: Sendable>: @unchecked Sendable {
     unowned var prev: LinkedListNode?
     unowned var next: LinkedListNode?
     let key: Key
@@ -39,7 +39,7 @@ fileprivate final class LinkedListNode<Key: Hashable, Value>: @unchecked Sendabl
 }
 
 // MARK: - Linked Map
-fileprivate final class LinkedList<Key: Hashable, Value> {
+fileprivate final class LinkedList<Key: Hashable & Sendable, Value: Sendable> {
     private(set) var head: LinkedListNode<Key, Value>?
     private(set) var tail: LinkedListNode<Key, Value>?
     var nodeMap: [Key: LinkedListNode<Key, Value>] = [:]
@@ -143,7 +143,7 @@ fileprivate final class LinkedList<Key: Hashable, Value> {
 
 
 // MARK: - MemoryCache
-public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
+public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unchecked Sendable {
     // MARK: - Properties
     
     /// The name of the cache. Default is nil.
@@ -190,11 +190,11 @@ public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
     
     /// A block to be executed when the app receives a memory warning.
     /// The default value is nil.
-    public var didReceiveMemoryWarningBlock: ((MemoryCache) -> Void)?
+    public var didReceiveMemoryWarningBlock: (@Sendable (MemoryCache) -> Void)?
     
     /// A block to be executed when the app enter background.
     /// The default value is nil.
-    public var didEnterBackgroundBlock: ((MemoryCache) -> Void)?
+    public var didEnterBackgroundBlock: (@Sendable (MemoryCache) -> Void)?
     
     /// If `true`, the key-value pair will be released on main thread, otherwise on
     /// background thread. Default is false.
@@ -231,35 +231,50 @@ public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
     private let lock: os_unfair_lock_t
     private let linkedList = LinkedList<Key, Value>()
     private let queue: DispatchQueue
+    private var memoryWarningObserver: (any NSObjectProtocol)?
+    private var enterBackgroundObserver: (any NSObjectProtocol)?
     
     // MARK: - Initialization
     
     public init() {
         lock = .allocate(capacity: 1)
         lock.initialize(to: os_unfair_lock())
-        queue = DispatchQueue(label: "com.retext.cache.memory")
+        queue = DispatchQueue(label: "com.reers.cache.memory")
         
-        // Add notification observers
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(appDidReceiveMemoryWarningNotification),
-            name: UIApplication.didReceiveMemoryWarningNotification,
-            object: nil
-        )
+        memoryWarningObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            didReceiveMemoryWarningBlock?(self)
+            if shouldRemoveAllObjectsOnMemoryWarning {
+                removeAllObjects()
+            }
+        }
         
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(appDidEnterBackgroundNotification),
-            name: UIApplication.didEnterBackgroundNotification,
-            object: nil
-        )
+        enterBackgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            didEnterBackgroundBlock?(self)
+            if shouldRemoveAllObjectsWhenEnteringBackground {
+                removeAllObjects()
+            }
+        }
         
         trimRecursively()
     }
     
     deinit {
-        NotificationCenter.default.removeObserver(self, name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
-        NotificationCenter.default.removeObserver(self, name: UIApplication.didEnterBackgroundNotification, object: nil)
+        if let observer = memoryWarningObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = enterBackgroundObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
         removeAllObjects()
         lock.deinitialize(count: 1)
         lock.deallocate()
@@ -387,30 +402,6 @@ public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
         _trimToAge(age)
     }
     
-    // MARK: - Notification Handlers
-    
-    @objc
-    private func appDidReceiveMemoryWarningNotification() {
-        if let didReceiveMemoryWarningBlock = didReceiveMemoryWarningBlock {
-            didReceiveMemoryWarningBlock(self)
-        }
-        
-        if shouldRemoveAllObjectsOnMemoryWarning {
-            removeAllObjects()
-        }
-    }
-    
-    @objc
-    private func appDidEnterBackgroundNotification() {
-        if let didEnterBackgroundBlock = didEnterBackgroundBlock {
-            didEnterBackgroundBlock(self)
-        }
-        
-        if shouldRemoveAllObjectsWhenEnteringBackground {
-            removeAllObjects()
-        }
-    }
-    
     // MARK: - Trimming
     
     private func trimRecursively() {
@@ -445,6 +436,7 @@ public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
         if finished { return }
         
         var holder: [LinkedListNode<Key, Value>] = []
+        var releaseOnMainThread = false
         while !finished {
             if os_unfair_lock_trylock(lock) {
                 if linkedList.totalCost > costLimit {
@@ -454,6 +446,7 @@ public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
                 } else {
                     finished = true
                 }
+                releaseOnMainThread = linkedList.releaseOnMainThread
                 os_unfair_lock_unlock(lock)
             } else {
                 usleep(10 * 1000)
@@ -461,10 +454,9 @@ public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
         }
         
         if !holder.isEmpty {
-            let releaseQueue: DispatchQueue = linkedList.releaseOnMainThread ? .main : .global(qos: .utility)
-            let holderCopy = holder
-            releaseQueue.async {
-                _ = holderCopy.count
+            let releaseQueue: DispatchQueue = releaseOnMainThread ? .main : .global(qos: .utility)
+            releaseQueue.async { [holder] in
+                _ = holder
             }
         }
     }
@@ -482,6 +474,7 @@ public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
         if finished { return }
         
         var holder: [LinkedListNode<Key, Value>] = []
+        var releaseOnMainThread = false
         while !finished {
             if os_unfair_lock_trylock(lock) {
                 if linkedList.totalCount > countLimit {
@@ -491,6 +484,7 @@ public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
                 } else {
                     finished = true
                 }
+                releaseOnMainThread = linkedList.releaseOnMainThread
                 os_unfair_lock_unlock(lock)
             } else {
                 usleep(10 * 1000)
@@ -498,10 +492,9 @@ public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
         }
         
         if !holder.isEmpty {
-            let releaseQueue: DispatchQueue = linkedList.releaseOnMainThread ? .main : .global(qos: .utility)
-            let holderCopy = holder
-            releaseQueue.async {
-                _ = holderCopy.count
+            let releaseQueue: DispatchQueue = releaseOnMainThread ? .main : .global(qos: .utility)
+            releaseQueue.async { [holder] in
+                _ = holder
             }
         }
     }
@@ -520,6 +513,7 @@ public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
         if finished { return }
         
         var holder: [LinkedListNode<Key, Value>] = []
+        var releaseOnMainThread = false
         while !finished {
             if os_unfair_lock_trylock(lock) {
                 if let tail = linkedList.tail, (now - tail.time) > ageLimit {
@@ -529,6 +523,7 @@ public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
                 } else {
                     finished = true
                 }
+                releaseOnMainThread = linkedList.releaseOnMainThread
                 os_unfair_lock_unlock(lock)
             } else {
                 usleep(10 * 1000)
@@ -536,10 +531,9 @@ public final class MemoryCache<Key: Hashable, Value>: @unchecked Sendable {
         }
         
         if !holder.isEmpty {
-            let releaseQueue: DispatchQueue = linkedList.releaseOnMainThread ? .main : .global(qos: .utility)
-            let holderCopy = holder
-            releaseQueue.async {
-                _ = holderCopy
+            let releaseQueue: DispatchQueue = releaseOnMainThread ? .main : .global(qos: .utility)
+            releaseQueue.async { [holder] in
+                _ = holder
             }
         }
     }
