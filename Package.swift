@@ -18,5 +18,9 @@ let package = Package(
         .target(
             name: "RECache"
         ),
+        .testTarget(
+            name: "RECacheTests",
+            dependencies: ["RECache"]
+        ),
     ]
 )
