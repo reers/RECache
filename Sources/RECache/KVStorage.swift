@@ -19,6 +19,7 @@
 //  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 //  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 //  THE SOFTWARE.
+//
 
 #if canImport(UIKit)
 import UIKit
@@ -26,24 +27,52 @@ import UIKit
 import Foundation
 import SQLite3
 
-// MARK: - KVStorageType
-
-public enum KVStorageType: Int, Sendable {
-    case file = 0
-    case sqlite = 1
-    case mixed = 2
-}
-
 // MARK: - KVStorageItem
 
+/// KVStorageItem is used by `KVStorage` to store key-value pair and meta data.
+/// Typically, you should not use this class directly.
 public final class KVStorageItem: @unchecked Sendable {
+    /// key
     public var key: String = ""
+    /// value
     public var value: Data = Data()
+    /// filename (nil if inline)
     public var filename: String?
+    /// value's size in bytes
     public var size: Int32 = 0
+    /// modification unix timestamp
     public var modTime: Int32 = 0
+    /// last access unix timestamp
     public var accessTime: Int32 = 0
+    /// extended data (nil if no extended data)
     public var extendedData: Data?
+}
+
+// MARK: - KVStorageType
+
+/// Storage type, indicated where the `KVStorageItem.value` stored.
+///
+/// @discussion Typically, write data to sqlite is faster than extern file, but
+/// reading performance is dependent on data size. In my test (on iPhone 6 64G),
+/// read data from extern file is faster than from sqlite when the data is larger
+/// than 20KB.
+///
+/// * If you want to store large number of small datas (such as contacts cache),
+///   use KVStorageType.sqlite to get better performance.
+/// * If you want to store large files (such as image cache),
+///   use KVStorageType.file to get better performance.
+/// * You can use KVStorageType.mixed and choice your storage type for each item.
+///
+/// See <http://www.sqlite.org/intern-v-extern-blob.html> for more information.
+public enum KVStorageType: UInt, Sendable {
+    /// The `value` is stored as a file in file system.
+    case file = 0
+
+    /// The `value` is stored in sqlite with blob type.
+    case sqlite = 1
+
+    /// The `value` is stored in file system or sqlite based on your choice.
+    case mixed = 2
 }
 
 // MARK: - Constants
@@ -57,9 +86,36 @@ private let kDBWalFileName = "manifest.sqlite-wal"
 private let kDataDirectoryName = "data"
 private let kTrashDirectoryName = "trash"
 
+/*
+ File:
+ /path/
+      /manifest.sqlite
+      /manifest.sqlite-shm
+      /manifest.sqlite-wal
+      /data/
+           /e10adc3949ba59abbe56e057f20f883e
+           /e10adc3949ba59abbe56e057f20f883e
+      /trash/
+            /unused_file_or_folder
+
+ SQL:
+ create table if not exists manifest (
+    key                 text,
+    filename            text,
+    size                integer,
+    inline_data         blob,
+    modification_time   integer,
+    last_access_time    integer,
+    extended_data       blob,
+    primary key(key)
+ );
+ create index if not exists last_access_time_idx on manifest(last_access_time);
+ */
+
 // MARK: - Shared Application Helper
 
 #if canImport(UIKit) && !os(watchOS)
+/// Returns nil in App Extension.
 private func sharedApplication() -> UIApplication? {
     let isAppExtension: Bool = {
         guard let cls = NSClassFromString("UIApplication"),
@@ -82,12 +138,29 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 
 // MARK: - KVStorage
 
+/// KVStorage is a key-value storage based on sqlite and file system.
+/// Typically, you should not use this class directly.
+///
+/// @discussion The designated initializer for KVStorage is `init(path:type:)`.
+/// After initialized, a directory is created based on the `path` to hold key-value data.
+/// Once initialized you should not read or write this directory without the instance.
+///
+/// You may compile the latest version of sqlite and ignore the libsqlite3.dylib in
+/// iOS system to get 2x~4x speed up.
+///
+/// @warning The instance of this class is *NOT* thread safe, you need to make sure
+/// that there's only one thread to access the instance at the same time. If you really
+/// need to process large amounts of data in multi-thread, you should split the data
+/// to multiple KVStorage instance (sharding).
 public final class KVStorage {
 
-    // MARK: - Public Properties
+    // MARK: - Attribute
 
+    /// The path of this storage.
     public let path: String
+    /// The type of this storage.
     public let type: KVStorageType
+    /// Set `true` to enable error logs for debug.
     public var errorLogsEnabled: Bool = true
 
     // MARK: - Private Properties
@@ -103,8 +176,17 @@ public final class KVStorage {
     private var dbLastOpenErrorTime: TimeInterval = 0
     private var dbOpenErrorCount: Int = 0
 
-    // MARK: - Initialization
+    // MARK: - Initializer
 
+    /// The designated initializer.
+    ///
+    /// @param path  Full path of a directory in which the storage will write data. If
+    ///    the directory is not exists, it will try to create one, otherwise it will
+    ///    read the data in this directory.
+    /// @param type  The storage type. After first initialized you should not change the
+    ///    type of the specified path.
+    /// @return  A new storage object, or nil if an error occurs.
+    /// @warning Multiple instances with the same path will make the storage unstable.
     public init?(path: String, type: KVStorageType) {
         guard !path.isEmpty, path.count <= kPathLengthMax else {
             NSLog("KVStorage init error: invalid path: [%@].", path)
@@ -129,15 +211,16 @@ public final class KVStorage {
         }
 
         if !dbOpen() || !dbInitialize() {
+            // db file may broken...
             dbClose()
-            reset()
+            reset() // rebuild
             if !dbOpen() || !dbInitialize() {
                 dbClose()
                 NSLog("KVStorage init error: fail to open sqlite db.")
                 return nil
             }
         }
-        fileEmptyTrashInBackground()
+        fileEmptyTrashInBackground() // empty the trash if failed at last time
     }
 
     deinit {
@@ -154,16 +237,51 @@ public final class KVStorage {
 
     // MARK: - Save Items
 
+    /// Save an item or update the item with 'key' if it already exists.
+    ///
+    /// @discussion This method will save the item.key, item.value, item.filename and
+    /// item.extendedData to disk or sqlite, other properties will be ignored. item.key
+    /// and item.value should not be empty (nil or zero length).
+    ///
+    /// If the `type` is KVStorageType.file, then the item.filename should not be empty.
+    /// If the `type` is KVStorageType.sqlite, then the item.filename will be ignored.
+    /// It the `type` is KVStorageType.mixed, then the item.value will be saved to file
+    /// system if the item.filename is not empty, otherwise it will be saved to sqlite.
+    ///
+    /// @param item  An item.
+    /// @return Whether succeed.
     @discardableResult
     public func saveItem(_ item: KVStorageItem) -> Bool {
         return saveItem(withKey: item.key, value: item.value, filename: item.filename, extendedData: item.extendedData)
     }
 
+    /// Save an item or update the item with 'key' if it already exists.
+    ///
+    /// @discussion This method will save the key-value pair to sqlite. If the `type` is
+    /// KVStorageType.file, then this method will failed.
+    ///
+    /// @param key   The key, should not be empty (nil or zero length).
+    /// @param value The key, should not be empty (nil or zero length).
+    /// @return Whether succeed.
     @discardableResult
     public func saveItem(withKey key: String, value: Data) -> Bool {
         return saveItem(withKey: key, value: value, filename: nil, extendedData: nil)
     }
 
+    /// Save an item or update the item with 'key' if it already exists.
+    ///
+    /// @discussion
+    /// If the `type` is KVStorageType.file, then the `filename` should not be empty.
+    /// If the `type` is KVStorageType.sqlite, then the `filename` will be ignored.
+    /// It the `type` is KVStorageType.mixed, then the `value` will be saved to file
+    /// system if the `filename` is not empty, otherwise it will be saved to sqlite.
+    ///
+    /// @param key           The key, should not be empty (nil or zero length).
+    /// @param value         The key, should not be empty (nil or zero length).
+    /// @param filename      The filename.
+    /// @param extendedData  The extended data for this item (pass nil to ignore it).
+    ///
+    /// @return Whether succeed.
     @discardableResult
     public func saveItem(withKey key: String, value: Data, filename: String?, extendedData: Data?) -> Bool {
         if key.isEmpty || value.isEmpty { return false }
@@ -193,6 +311,10 @@ public final class KVStorage {
 
     // MARK: - Remove Items
 
+    /// Remove an item with 'key'.
+    ///
+    /// @param key The item's key.
+    /// @return Whether succeed.
     @discardableResult
     public func removeItem(forKey key: String) -> Bool {
         if key.isEmpty { return false }
@@ -208,6 +330,11 @@ public final class KVStorage {
         }
     }
 
+    /// Remove items with an array of keys.
+    ///
+    /// @param keys An array of specified keys.
+    ///
+    /// @return Whether succeed.
     @discardableResult
     public func removeItem(forKeys keys: [String]) -> Bool {
         if keys.isEmpty { return false }
@@ -225,6 +352,10 @@ public final class KVStorage {
         }
     }
 
+    /// Remove all items which `value` is larger than a specified size.
+    ///
+    /// @param size  The maximum size in bytes.
+    /// @return Whether succeed.
     @discardableResult
     public func removeItemsLargerThanSize(_ size: Int32) -> Bool {
         if size == Int32.max { return true }
@@ -251,6 +382,10 @@ public final class KVStorage {
         return false
     }
 
+    /// Remove all items which last access time is earlier than a specified timestamp.
+    ///
+    /// @param time  The specified unix timestamp.
+    /// @return Whether succeed.
     @discardableResult
     public func removeItemsEarlierThanTime(_ time: Int32) -> Bool {
         if time <= 0 { return true }
@@ -277,6 +412,11 @@ public final class KVStorage {
         return false
     }
 
+    /// Remove items to make the total size not larger than a specified size.
+    /// The least recently used (LRU) items will be removed first.
+    ///
+    /// @param maxSize The specified size in bytes.
+    /// @return Whether succeed.
     @discardableResult
     public func removeItemsToFitSize(_ maxSize: Int32) -> Bool {
         if maxSize == Int32.max { return true }
@@ -310,6 +450,11 @@ public final class KVStorage {
         return suc
     }
 
+    /// Remove items to make the total count not larger than a specified count.
+    /// The least recently used (LRU) items will be removed first.
+    ///
+    /// @param maxCount The specified item count.
+    /// @return Whether succeed.
     @discardableResult
     public func removeItemsToFitCount(_ maxCount: Int32) -> Bool {
         if maxCount == Int32.max { return true }
@@ -343,6 +488,13 @@ public final class KVStorage {
         return suc
     }
 
+    /// Remove all items in background queue.
+    ///
+    /// @discussion This method will remove the files and sqlite database to a trash
+    /// folder, and then clear the folder in background queue. So this method is much
+    /// faster than `removeAllItems(progress:end:)`.
+    ///
+    /// @return Whether succeed.
     @discardableResult
     public func removeAllItems() -> Bool {
         if !dbClose() { return false }
@@ -352,6 +504,11 @@ public final class KVStorage {
         return true
     }
 
+    /// Remove all items.
+    ///
+    /// @warning You should not send message to this instance in these blocks.
+    /// @param progress This block will be invoked during removing, pass nil to ignore.
+    /// @param end      This block will be invoked at the end, pass nil to ignore.
     public func removeAllItems(progress: ((_ removedCount: Int32, _ totalCount: Int32) -> Void)?,
                                end: ((_ error: Bool) -> Void)?) {
         let total = dbGetTotalItemCount()
@@ -387,6 +544,10 @@ public final class KVStorage {
 
     // MARK: - Get Items
 
+    /// Get item with a specified key.
+    ///
+    /// @param key A specified key.
+    /// @return Item for the key, or nil if not exists / error occurs.
     public func getItem(forKey key: String) -> KVStorageItem? {
         if key.isEmpty { return nil }
         var item = dbGetItem(withKey: key, excludeInlineData: false)
@@ -403,11 +564,20 @@ public final class KVStorage {
         return item
     }
 
+    /// Get item information with a specified key.
+    /// The `value` in this item will be ignored.
+    ///
+    /// @param key A specified key.
+    /// @return Item information for the key, or nil if not exists / error occurs.
     public func getItemInfo(forKey key: String) -> KVStorageItem? {
         if key.isEmpty { return nil }
         return dbGetItem(withKey: key, excludeInlineData: true)
     }
 
+    /// Get item value with a specified key.
+    ///
+    /// @param key  A specified key.
+    /// @return Item's value, or nil if not exists / error occurs.
     public func getItemValue(forKey key: String) -> Data? {
         if key.isEmpty { return nil }
         var value: Data?
@@ -441,6 +611,10 @@ public final class KVStorage {
         return value
     }
 
+    /// Get items with an array of keys.
+    ///
+    /// @param keys  An array of specified keys.
+    /// @return An array of `KVStorageItem`, or nil if not exists / error occurs.
     public func getItem(forKeys keys: [String]) -> [KVStorageItem]? {
         if keys.isEmpty { return nil }
         guard var items = dbGetItem(withKeys: keys, excludeInlineData: false) else { return nil }
@@ -467,11 +641,21 @@ public final class KVStorage {
         return items.isEmpty ? nil : items
     }
 
+    /// Get item infomartions with an array of keys.
+    /// The `value` in items will be ignored.
+    ///
+    /// @param keys  An array of specified keys.
+    /// @return An array of `KVStorageItem`, or nil if not exists / error occurs.
     public func getItemInfo(forKeys keys: [String]) -> [KVStorageItem]? {
         if keys.isEmpty { return nil }
         return dbGetItem(withKeys: keys, excludeInlineData: true)
     }
 
+    /// Get items value with an array of keys.
+    ///
+    /// @param keys  An array of specified keys.
+    /// @return A dictionary which key is 'key' and value is 'value', or nil if not
+    ///    exists / error occurs.
     public func getItemValue(forKeys keys: [String]) -> [String: Data]? {
         guard let items = getItem(forKeys: keys) else { return nil }
         var kv: [String: Data] = [:]
@@ -485,20 +669,29 @@ public final class KVStorage {
 
     // MARK: - Get Storage Status
 
+    /// Whether an item exists for a specified key.
+    ///
+    /// @param key  A specified key.
+    ///
+    /// @return `true` if there's an item exists for the key, `false` if not exists or an error occurs.
     public func itemExists(forKey key: String) -> Bool {
         if key.isEmpty { return false }
         return dbGetItemCount(withKey: key) > 0
     }
 
+    /// Get total item count.
+    /// @return Total item count, -1 when an error occurs.
     public func getItemsCount() -> Int32 {
         return dbGetTotalItemCount()
     }
 
+    /// Get item value's total size in bytes.
+    /// @return Total size in bytes, -1 when an error occurs.
     public func getItemsSize() -> Int32 {
         return dbGetTotalItemSize()
     }
 
-    // MARK: - Private DB Methods
+    // MARK: - db
 
     @discardableResult
     private func dbOpen() -> Bool {
@@ -587,6 +780,7 @@ public final class KVStorage {
 
     private func dbCheckpoint() {
         if !dbCheck() { return }
+        // Cause a checkpoint to occur, merge `sqlite-wal` file to `sqlite` file.
         sqlite3_wal_checkpoint(db, nil)
     }
 
@@ -1088,7 +1282,7 @@ public final class KVStorage {
         return sqlite3_column_int(stmt, 0)
     }
 
-    // MARK: - Private File Methods
+    // MARK: - file
 
     @discardableResult
     private func fileWrite(withName filename: String, data: Data) -> Bool {
@@ -1147,8 +1341,10 @@ public final class KVStorage {
         }
     }
 
-    // MARK: - Private Reset
+    // MARK: - private
 
+    /// Delete all files and empty in background.
+    /// Make sure the db is closed.
     private func reset() {
         try? FileManager.default.removeItem(atPath: (path as NSString).appendingPathComponent(kDBFileName))
         try? FileManager.default.removeItem(atPath: (path as NSString).appendingPathComponent(kDBShmFileName))
