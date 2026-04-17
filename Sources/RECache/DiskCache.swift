@@ -24,6 +24,13 @@
 #if canImport(UIKit)
 import UIKit
 #endif
+// `@preconcurrency` is required because we expose block-based APIs that pass
+// `NSCoding?` values through `@Sendable` async closures. `NSCoding` is an
+// `@objc` protocol that does not conform to `Sendable`, yet the common concrete
+// implementations (`NSString`, `NSNumber`, `NSData`, ...) are effectively
+// immutable value types and are safe to hand off across threads in practice.
+// Removal plan: drop once all public APIs either become `async`, take only
+// `Sendable` payloads, or Foundation's `NSCoding` gains `Sendable` conformance.
 @preconcurrency import Foundation
 import CryptoKit
 import ObjectiveC.runtime
@@ -31,6 +38,12 @@ import ObjectiveC.runtime
 // MARK: - Associated object key
 
 /// Key for the extended data associated object.
+///
+/// Safety invariant: the stored byte is never read or written. Only its
+/// **address** is used as a unique key for `objc_setAssociatedObject` /
+/// `objc_getAssociatedObject`. The Swift language forbids taking `&` of a
+/// `let`, so this must be a `var`; `nonisolated(unsafe)` is sound because no
+/// data-race on the value can ever occur.
 nonisolated(unsafe) private var kExtendedDataKey: UInt8 = 0
 
 // MARK: - Helpers
@@ -59,6 +72,15 @@ private func stringMD5(_ string: String) -> String {
 /// Weakly-referenced cache of all live `DiskCache` instances, keyed by path.
 /// Using file-level `let` gives us thread-safe lazy initialization, equivalent
 /// to the `dispatch_once` pattern used by `YYDiskCache`.
+///
+/// Safety invariant: every read / write of `globalInstances` happens while
+/// `globalInstancesLock` is held (see `diskCacheGetGlobal` /
+/// `diskCacheSetGlobal`). `NSMapTable` is not `Sendable`, but the mutex
+/// makes cross-thread access race-free. `nonisolated(unsafe)` documents that
+/// the compiler can't verify this — the callers must.
+/// Removal plan: replace with an `actor`-backed registry (or a
+/// `ManagedAtomic<NSMapTable>` once available) if the public API ever becomes
+/// async; a sync `init?` can't be satisfied by an actor today.
 private let globalInstancesLock = DispatchSemaphore(value: 1)
 nonisolated(unsafe) private let globalInstances: NSMapTable<NSString, DiskCache> = NSMapTable(
     keyOptions: .strongMemory,
@@ -94,6 +116,28 @@ private func diskCacheSetGlobal(_ cache: DiskCache) {
 ///
 /// You may compile the latest version of sqlite and ignore the libsqlite3.dylib in
 /// iOS system to get 2x~4x speed up.
+///
+/// Concurrency:
+/// `@unchecked Sendable` is required because the class holds non-`Sendable`
+/// stored properties (`KVStorage`, custom archive / unarchive / filename
+/// closures, `name`) that are mutated after construction. Safety is provided
+/// by the following invariants, equivalent to the `Lock()` / `Unlock()` macros
+/// of `YYDiskCache`:
+///
+/// * All access to `kv`, and to any limit / name / custom-block property read
+///   inside the mutating code paths (`setObject`, `object(forKey:)`,
+///   `removeObject`, `removeAllObjects`, `trim*`, `errorLogsEnabled`,
+///   `appWillBeTerminated`) is performed while `lock` is held.
+/// * `customArchiveBlock`, `customUnarchiveBlock`, `customFileNameBlock`
+///   and `name` follow the "configure once, use after" convention of the
+///   original `YYDiskCache`; assigning them from multiple threads
+///   concurrently is not supported.
+///
+/// Removal plan: revisit once the public, synchronous Objective-C–style API
+/// can be replaced by an `actor`-based, `async` surface. A direct `actor`
+/// migration would force every caller to `await`, breaking 1:1 compatibility
+/// with `YYDiskCache`; keep `@unchecked Sendable` until that trade-off is
+/// acceptable.
 public final class DiskCache: @unchecked Sendable {
 
     // MARK: - Attribute
