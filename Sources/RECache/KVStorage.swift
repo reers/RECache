@@ -115,20 +115,19 @@ private let kTrashDirectoryName = "trash"
 // MARK: - Shared Application Helper
 
 #if canImport(UIKit) && !os(watchOS)
+private let isAppExtension: Bool = {
+    guard let cls = NSClassFromString("UIApplication"),
+          cls.responds(to: NSSelectorFromString("sharedApplication")) else {
+        return true
+    }
+    return Bundle.main.bundlePath.hasSuffix(".appex")
+}()
+
 /// Returns nil in App Extension.
 private func sharedApplication() -> UIApplication? {
-    let isAppExtension: Bool = {
-        guard let cls = NSClassFromString("UIApplication"),
-              cls.responds(to: NSSelectorFromString("sharedApplication")) else {
-            return true
-        }
-        if Bundle.main.bundlePath.hasSuffix(".appex") {
-            return true
-        }
-        return false
-    }()
     if isAppExtension { return nil }
-    return UIApplication.value(forKey: "sharedApplication") as? UIApplication
+    let selector = NSSelectorFromString("sharedApplication")
+    return UIApplication.perform(selector)?.takeUnretainedValue() as? UIApplication
 }
 #endif
 
