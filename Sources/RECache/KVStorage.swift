@@ -718,7 +718,7 @@ public final class KVStorage {
             dbOpenErrorCount += 1
 
             if errorLogsEnabled {
-                NSLog("KVStorage dbOpen failed (%d).", result)
+                NSLog("\(#function) line:\(#line) sqlite open failed (\(result)).")
             }
             return false
         }
@@ -747,7 +747,7 @@ public final class KVStorage {
                 }
             } else if result != SQLITE_OK {
                 if errorLogsEnabled {
-                    NSLog("KVStorage dbClose failed (%d).", result)
+                    NSLog("\(#function) line:\(#line) sqlite close failed (\(result)).")
                 }
             }
         } while retry
@@ -788,7 +788,7 @@ public final class KVStorage {
         let result = sql.withCString { sqlite3_exec(db, $0, nil, nil, &error) }
         if let error = error {
             if errorLogsEnabled {
-                NSLog("KVStorage dbExecute error (%d): %s", result, error)
+                NSLog("\(#function) line:\(#line) sqlite exec error (\(result)): \(String(cString: error))")
             }
             sqlite3_free(error)
         }
@@ -802,7 +802,7 @@ public final class KVStorage {
             let result = sql.withCString { sqlite3_prepare_v2(db, $0, -1, &stmt, nil) }
             if result != SQLITE_OK {
                 if errorLogsEnabled {
-                    NSLog("KVStorage dbPrepareStmt error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                    NSLog("\(#function) line:\(#line) sqlite stmt prepare error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
                 }
                 return nil
             }
@@ -864,7 +864,7 @@ public final class KVStorage {
         let result = sqlite3_step(stmt)
         if result != SQLITE_DONE {
             if errorLogsEnabled {
-                NSLog("KVStorage dbSave error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite insert error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return false
         }
@@ -880,7 +880,7 @@ public final class KVStorage {
         let result = sqlite3_step(stmt)
         if result != SQLITE_DONE {
             if errorLogsEnabled {
-                NSLog("KVStorage dbUpdateAccessTime error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite update error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return false
         }
@@ -897,7 +897,7 @@ public final class KVStorage {
         let result = sql.withCString { sqlite3_prepare_v2(db, $0, -1, &stmt, nil) }
         if result != SQLITE_OK {
             if errorLogsEnabled {
-                NSLog("KVStorage dbUpdateAccessTimeWithKeys prepare error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite stmt prepare error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return false
         }
@@ -907,7 +907,7 @@ public final class KVStorage {
         sqlite3_finalize(stmt)
         if stepResult != SQLITE_DONE {
             if errorLogsEnabled {
-                NSLog("KVStorage dbUpdateAccessTimeWithKeys step error (%d): %s", stepResult, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite update error (\(stepResult)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return false
         }
@@ -923,7 +923,7 @@ public final class KVStorage {
         let result = sqlite3_step(stmt)
         if result != SQLITE_DONE {
             if errorLogsEnabled {
-                NSLog("KVStorage dbDeleteItem error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) db delete error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return false
         }
@@ -938,7 +938,7 @@ public final class KVStorage {
         let result = sql.withCString { sqlite3_prepare_v2(db, $0, -1, &stmt, nil) }
         if result != SQLITE_OK {
             if errorLogsEnabled {
-                NSLog("KVStorage dbDeleteItemWithKeys prepare error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite stmt prepare error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return false
         }
@@ -948,7 +948,7 @@ public final class KVStorage {
         sqlite3_finalize(stmt)
         if stepResult == SQLITE_ERROR {
             if errorLogsEnabled {
-                NSLog("KVStorage dbDeleteItemWithKeys step error (%d): %s", stepResult, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite delete error (\(stepResult)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return false
         }
@@ -963,7 +963,7 @@ public final class KVStorage {
         let result = sqlite3_step(stmt)
         if result != SQLITE_DONE {
             if errorLogsEnabled {
-                NSLog("KVStorage dbDeleteItemsWithSizeLargerThan error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite delete error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return false
         }
@@ -978,7 +978,7 @@ public final class KVStorage {
         let result = sqlite3_step(stmt)
         if result != SQLITE_DONE {
             if errorLogsEnabled {
-                NSLog("KVStorage dbDeleteItemsWithTimeEarlierThan error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite delete error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return false
         }
@@ -1031,7 +1031,7 @@ public final class KVStorage {
         } else {
             if result != SQLITE_DONE {
                 if errorLogsEnabled {
-                    NSLog("KVStorage dbGetItemWithKey error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                    NSLog("\(#function) line:\(#line) sqlite query error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
                 }
             }
             return nil
@@ -1051,7 +1051,7 @@ public final class KVStorage {
         let result = sql.withCString { sqlite3_prepare_v2(db, $0, -1, &stmt, nil) }
         if result != SQLITE_OK {
             if errorLogsEnabled {
-                NSLog("KVStorage dbGetItemWithKeys prepare error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite stmt prepare error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return nil
         }
@@ -1067,7 +1067,7 @@ public final class KVStorage {
                 break
             } else {
                 if errorLogsEnabled {
-                    NSLog("KVStorage dbGetItemWithKeys step error (%d): %s", stepResult, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                    NSLog("\(#function) line:\(#line) sqlite query error (\(stepResult)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
                 }
                 items = nil
                 break
@@ -1091,7 +1091,7 @@ public final class KVStorage {
         } else {
             if result != SQLITE_DONE {
                 if errorLogsEnabled {
-                    NSLog("KVStorage dbGetValueWithKey error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                    NSLog("\(#function) line:\(#line) sqlite query error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
                 }
             }
             return nil
@@ -1111,7 +1111,7 @@ public final class KVStorage {
         } else {
             if result != SQLITE_DONE {
                 if errorLogsEnabled {
-                    NSLog("KVStorage dbGetFilenameWithKey error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                    NSLog("\(#function) line:\(#line) sqlite query error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
                 }
             }
         }
@@ -1125,7 +1125,7 @@ public final class KVStorage {
         let result = sql.withCString { sqlite3_prepare_v2(db, $0, -1, &stmt, nil) }
         if result != SQLITE_OK {
             if errorLogsEnabled {
-                NSLog("KVStorage dbGetFilenameWithKeys prepare error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite stmt prepare error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return nil
         }
@@ -1145,7 +1145,7 @@ public final class KVStorage {
                 break
             } else {
                 if errorLogsEnabled {
-                    NSLog("KVStorage dbGetFilenameWithKeys step error (%d): %s", stepResult, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                    NSLog("\(#function) line:\(#line) sqlite query error (\(stepResult)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
                 }
                 filenames = nil
                 break
@@ -1174,7 +1174,7 @@ public final class KVStorage {
                 break
             } else {
                 if errorLogsEnabled {
-                    NSLog("KVStorage dbGetFilenamesWithSizeLargerThan error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                    NSLog("\(#function) line:\(#line) sqlite query error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
                 }
                 filenames = nil
                 break
@@ -1202,7 +1202,7 @@ public final class KVStorage {
                 break
             } else {
                 if errorLogsEnabled {
-                    NSLog("KVStorage dbGetFilenamesWithTimeEarlierThan error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                    NSLog("\(#function) line:\(#line) sqlite query error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
                 }
                 filenames = nil
                 break
@@ -1237,7 +1237,7 @@ public final class KVStorage {
                 break
             } else {
                 if errorLogsEnabled {
-                    NSLog("KVStorage dbGetItemSizeInfoOrderByTimeAsc error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                    NSLog("\(#function) line:\(#line) sqlite query error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
                 }
                 items = nil
                 break
@@ -1253,7 +1253,7 @@ public final class KVStorage {
         let result = sqlite3_step(stmt)
         if result != SQLITE_ROW {
             if errorLogsEnabled {
-                NSLog("KVStorage dbGetItemCountWithKey error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite query error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return -1
         }
@@ -1266,7 +1266,7 @@ public final class KVStorage {
         let result = sqlite3_step(stmt)
         if result != SQLITE_ROW {
             if errorLogsEnabled {
-                NSLog("KVStorage dbGetTotalItemSize error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite query error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return -1
         }
@@ -1279,7 +1279,7 @@ public final class KVStorage {
         let result = sqlite3_step(stmt)
         if result != SQLITE_ROW {
             if errorLogsEnabled {
-                NSLog("KVStorage dbGetTotalItemCount error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                NSLog("\(#function) line:\(#line) sqlite query error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
             }
             return -1
         }
