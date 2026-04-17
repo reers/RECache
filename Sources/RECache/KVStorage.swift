@@ -131,8 +131,14 @@ private func sharedApplication() -> UIApplication? {
 }
 #endif
 
-// MARK: - SQLITE_TRANSIENT helper
+// MARK: - SQLite helpers
 
+/// SQLite's `SQLITE_TRANSIENT` macro rebuilt for Swift. Passed as the
+/// destructor argument of `sqlite3_bind_text` / `sqlite3_bind_blob` to have
+/// SQLite immediately copy the bound bytes, so the original pointer only
+/// needs to be valid for the duration of the bind call. This is required
+/// when the pointer comes from `withCString` / `withUnsafeBytes`, because
+/// those pointers expire as soon as the closure returns.
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 // MARK: - KVStorage
@@ -696,7 +702,7 @@ public final class KVStorage {
     private func dbOpen() -> Bool {
         if db != nil { return true }
 
-        let result = sqlite3_open(dbPath, &db)
+        let result = dbPath.withCString { sqlite3_open($0, &db) }
         if result == SQLITE_OK {
             dbStmtCache = [:]
             dbLastOpenErrorTime = 0
@@ -789,7 +795,7 @@ public final class KVStorage {
         if !dbCheck() { return false }
 
         var error: UnsafeMutablePointer<CChar>?
-        let result = sqlite3_exec(db, sql, nil, nil, &error)
+        let result = sql.withCString { sqlite3_exec(db, $0, nil, nil, &error) }
         if let error = error {
             if errorLogsEnabled {
                 NSLog("KVStorage dbExecute error (%d): %s", result, error)
@@ -808,7 +814,7 @@ public final class KVStorage {
         }
 
         var stmt: OpaquePointer?
-        let result = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        let result = sql.withCString { sqlite3_prepare_v2(db, $0, -1, &stmt, nil) }
         if result != SQLITE_OK {
             if errorLogsEnabled {
                 NSLog("KVStorage dbPrepareStmt error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
@@ -825,8 +831,7 @@ public final class KVStorage {
 
     private func dbBindJoinedKeys(_ keys: [String], stmt: OpaquePointer, fromIndex index: Int32) {
         for i in 0..<Int32(keys.count) {
-            let key = keys[Int(i)]
-            sqlite3_bind_text(stmt, index + i, key, -1, SQLITE_TRANSIENT)
+            _ = keys[Int(i)].withCString { sqlite3_bind_text(stmt, index + i, $0, -1, SQLITE_TRANSIENT) }
         }
     }
 
@@ -836,8 +841,12 @@ public final class KVStorage {
         guard let stmt = dbPrepareStmt(sql) else { return false }
 
         let timestamp = Int32(time(nil))
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 2, fileName, -1, SQLITE_TRANSIENT)
+        _ = key.withCString { sqlite3_bind_text(stmt, 1, $0, -1, SQLITE_TRANSIENT) }
+        if let fileName = fileName {
+            _ = fileName.withCString { sqlite3_bind_text(stmt, 2, $0, -1, SQLITE_TRANSIENT) }
+        } else {
+            sqlite3_bind_null(stmt, 2)
+        }
         sqlite3_bind_int(stmt, 3, Int32(value.count))
         if fileName == nil || fileName!.isEmpty {
             value.withUnsafeBytes { rawBuffer in
@@ -871,7 +880,7 @@ public final class KVStorage {
         let sql = "update manifest set last_access_time = ?1 where key = ?2;"
         guard let stmt = dbPrepareStmt(sql) else { return false }
         sqlite3_bind_int(stmt, 1, Int32(time(nil)))
-        sqlite3_bind_text(stmt, 2, key, -1, SQLITE_TRANSIENT)
+        _ = key.withCString { sqlite3_bind_text(stmt, 2, $0, -1, SQLITE_TRANSIENT) }
         let result = sqlite3_step(stmt)
         if result != SQLITE_DONE {
             if errorLogsEnabled {
@@ -889,7 +898,7 @@ public final class KVStorage {
         let sql = "update manifest set last_access_time = \(t) where key in (\(dbJoinedKeys(keys)));"
 
         var stmt: OpaquePointer?
-        let result = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        let result = sql.withCString { sqlite3_prepare_v2(db, $0, -1, &stmt, nil) }
         if result != SQLITE_OK {
             if errorLogsEnabled {
                 NSLog("KVStorage dbUpdateAccessTimeWithKeys prepare error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
@@ -913,7 +922,7 @@ public final class KVStorage {
     private func dbDeleteItem(withKey key: String) -> Bool {
         let sql = "delete from manifest where key = ?1;"
         guard let stmt = dbPrepareStmt(sql) else { return false }
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
+        _ = key.withCString { sqlite3_bind_text(stmt, 1, $0, -1, SQLITE_TRANSIENT) }
 
         let result = sqlite3_step(stmt)
         if result != SQLITE_DONE {
@@ -930,7 +939,7 @@ public final class KVStorage {
         if !dbCheck() { return false }
         let sql = "delete from manifest where key in (\(dbJoinedKeys(keys)));"
         var stmt: OpaquePointer?
-        let result = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        let result = sql.withCString { sqlite3_prepare_v2(db, $0, -1, &stmt, nil) }
         if result != SQLITE_OK {
             if errorLogsEnabled {
                 NSLog("KVStorage dbDeleteItemWithKeys prepare error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
@@ -1018,7 +1027,7 @@ public final class KVStorage {
             ? "select key, filename, size, modification_time, last_access_time, extended_data from manifest where key = ?1;"
             : "select key, filename, size, inline_data, modification_time, last_access_time, extended_data from manifest where key = ?1;"
         guard let stmt = dbPrepareStmt(sql) else { return nil }
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
+        _ = key.withCString { sqlite3_bind_text(stmt, 1, $0, -1, SQLITE_TRANSIENT) }
 
         let result = sqlite3_step(stmt)
         if result == SQLITE_ROW {
@@ -1043,7 +1052,7 @@ public final class KVStorage {
         }
 
         var stmt: OpaquePointer?
-        let result = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        let result = sql.withCString { sqlite3_prepare_v2(db, $0, -1, &stmt, nil) }
         if result != SQLITE_OK {
             if errorLogsEnabled {
                 NSLog("KVStorage dbGetItemWithKeys prepare error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
@@ -1075,7 +1084,7 @@ public final class KVStorage {
     private func dbGetValue(withKey key: String) -> Data? {
         let sql = "select inline_data from manifest where key = ?1;"
         guard let stmt = dbPrepareStmt(sql) else { return nil }
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
+        _ = key.withCString { sqlite3_bind_text(stmt, 1, $0, -1, SQLITE_TRANSIENT) }
 
         let result = sqlite3_step(stmt)
         if result == SQLITE_ROW {
@@ -1096,7 +1105,7 @@ public final class KVStorage {
     private func dbGetFilename(withKey key: String) -> String? {
         let sql = "select filename from manifest where key = ?1;"
         guard let stmt = dbPrepareStmt(sql) else { return nil }
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
+        _ = key.withCString { sqlite3_bind_text(stmt, 1, $0, -1, SQLITE_TRANSIENT) }
         let result = sqlite3_step(stmt)
         if result == SQLITE_ROW {
             if let filename = sqlite3_column_text(stmt, 0) {
@@ -1117,7 +1126,7 @@ public final class KVStorage {
         if !dbCheck() { return nil }
         let sql = "select filename from manifest where key in (\(dbJoinedKeys(keys)));"
         var stmt: OpaquePointer?
-        let result = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        let result = sql.withCString { sqlite3_prepare_v2(db, $0, -1, &stmt, nil) }
         if result != SQLITE_OK {
             if errorLogsEnabled {
                 NSLog("KVStorage dbGetFilenameWithKeys prepare error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
@@ -1244,7 +1253,7 @@ public final class KVStorage {
     private func dbGetItemCount(withKey key: String) -> Int32 {
         let sql = "select count(key) from manifest where key = ?1;"
         guard let stmt = dbPrepareStmt(sql) else { return -1 }
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
+        _ = key.withCString { sqlite3_bind_text(stmt, 1, $0, -1, SQLITE_TRANSIENT) }
         let result = sqlite3_step(stmt)
         if result != SQLITE_ROW {
             if errorLogsEnabled {
