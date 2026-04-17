@@ -713,11 +713,6 @@ public final class KVStorage {
             return true
         } else {
             db = nil
-            if let cache = dbStmtCache {
-                for (_, stmt) in cache {
-                    sqlite3_finalize(stmt)
-                }
-            }
             dbStmtCache = nil
             dbLastOpenErrorTime = CACurrentMediaTime()
             dbOpenErrorCount += 1
@@ -737,11 +732,6 @@ public final class KVStorage {
         var retry = false
         var stmtFinalized = false
 
-        if let cache = dbStmtCache {
-            for (_, stmt) in cache {
-                sqlite3_finalize(stmt)
-            }
-        }
         dbStmtCache = nil
 
         repeat {
@@ -750,11 +740,8 @@ public final class KVStorage {
             if result == SQLITE_BUSY || result == SQLITE_LOCKED {
                 if !stmtFinalized {
                     stmtFinalized = true
-                    var stmt: OpaquePointer?
-                    while true {
-                        stmt = sqlite3_next_stmt(database, nil)
-                        guard let s = stmt else { break }
-                        sqlite3_finalize(s)
+                    while let stmt = sqlite3_next_stmt(database, nil) {
+                        sqlite3_finalize(stmt)
                         retry = true
                     }
                 }
@@ -810,26 +797,32 @@ public final class KVStorage {
 
     private func dbPrepareStmt(_ sql: String) -> OpaquePointer? {
         if !dbCheck() || sql.isEmpty || dbStmtCache == nil { return nil }
-
-        if let stmt = dbStmtCache?[sql] {
-            sqlite3_reset(stmt)
-            return stmt
-        }
-
-        var stmt: OpaquePointer?
-        let result = sql.withCString { sqlite3_prepare_v2(db, $0, -1, &stmt, nil) }
-        if result != SQLITE_OK {
-            if errorLogsEnabled {
-                NSLog("KVStorage dbPrepareStmt error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+        var stmt: OpaquePointer? = dbStmtCache?[sql]
+        if stmt == nil {
+            let result = sql.withCString { sqlite3_prepare_v2(db, $0, -1, &stmt, nil) }
+            if result != SQLITE_OK {
+                if errorLogsEnabled {
+                    NSLog("KVStorage dbPrepareStmt error (%d): %s", result, sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")
+                }
+                return nil
             }
-            return nil
+            dbStmtCache?[sql] = stmt
+        } else {
+            sqlite3_reset(stmt)
         }
-        dbStmtCache?[sql] = stmt
         return stmt
     }
 
     private func dbJoinedKeys(_ keys: [String]) -> String {
-        return keys.map { _ in "?" }.joined(separator: ",")
+        var string = ""
+        let max = keys.count
+        for i in 0..<max {
+            string += "?"
+            if i + 1 != max {
+                string += ","
+            }
+        }
+        return string
     }
 
     private func dbBindJoinedKeys(_ keys: [String], stmt: OpaquePointer, fromIndex index: Int32) {
@@ -860,7 +853,7 @@ public final class KVStorage {
         }
         sqlite3_bind_int(stmt, 5, timestamp)
         sqlite3_bind_int(stmt, 6, timestamp)
-        if let extendedData = extendedData, !extendedData.isEmpty {
+        if let extendedData = extendedData {
             extendedData.withUnsafeBytes { rawBuffer in
                 _ = sqlite3_bind_blob(stmt, 7, rawBuffer.baseAddress, Int32(rawBuffer.count), SQLITE_TRANSIENT)
             }
