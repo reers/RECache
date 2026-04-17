@@ -139,7 +139,7 @@ private func sharedApplication() -> UIApplication? {
 /// needs to be valid for the duration of the bind call. This is required
 /// when the pointer comes from `withCString` / `withUnsafeBytes`, because
 /// those pointers expire as soon as the closure returns.
-private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+private let SQLITE_TRANSIENT = unsafeBitCast(OpaquePointer(bitPattern: -1), to: sqlite3_destructor_type.self)
 
 // MARK: - KVStorage
 
