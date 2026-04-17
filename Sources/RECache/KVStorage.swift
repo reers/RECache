@@ -25,27 +25,28 @@
 import UIKit
 #endif
 import Foundation
+import QuartzCore
 import SQLite3
 
 // MARK: - KVStorageItem
 
 /// KVStorageItem is used by `KVStorage` to store key-value pair and meta data.
 /// Typically, you should not use this class directly.
-public final class KVStorageItem: @unchecked Sendable {
+final class KVStorageItem: @unchecked Sendable {
     /// key
-    public var key: String = ""
+var key: String = ""
     /// value
-    public var value: Data = Data()
+var value: Data = Data()
     /// filename (nil if inline)
-    public var filename: String?
+var filename: String?
     /// value's size in bytes
-    public var size: Int32 = 0
+var size: Int32 = 0
     /// modification unix timestamp
-    public var modTime: Int32 = 0
+var modTime: Int32 = 0
     /// last access unix timestamp
-    public var accessTime: Int32 = 0
+var accessTime: Int32 = 0
     /// extended data (nil if no extended data)
-    public var extendedData: Data?
+var extendedData: Data?
 }
 
 // MARK: - KVStorageType
@@ -64,7 +65,7 @@ public final class KVStorageItem: @unchecked Sendable {
 /// * You can use `KVStorageType.mixed` and choice your storage type for each item.
 ///
 /// See <http://www.sqlite.org/intern-v-extern-blob.html> for more information.
-public enum KVStorageType: UInt, Sendable {
+enum KVStorageType: UInt, Sendable {
     /// The `value` is stored as a file in file system.
     case file = 0
 
@@ -157,16 +158,16 @@ private let SQLITE_TRANSIENT = unsafeBitCast(OpaquePointer(bitPattern: -1), to: 
 ///   that there's only one thread to access the instance at the same time. If you really
 ///   need to process large amounts of data in multi-thread, you should split the data
 ///   to multiple KVStorage instance (sharding).
-public final class KVStorage {
+final class KVStorage {
 
     // MARK: - Attribute
 
     /// The path of this storage.
-    public let path: String
+let path: String
     /// The type of this storage.
-    public let type: KVStorageType
+let type: KVStorageType
     /// Set `true` to enable error logs for debug.
-    public var errorLogsEnabled: Bool = true
+var errorLogsEnabled: Bool = true
 
     // MARK: - Private Properties
 
@@ -192,7 +193,7 @@ public final class KVStorage {
     ///   - type: The storage type. After first initialized you should not change the
     ///     type of the specified path.
     /// - Warning: Multiple instances with the same path will make the storage unstable.
-    public init?(path: String, type: KVStorageType) {
+init?(path: String, type: KVStorageType) {
         guard !path.isEmpty, path.count <= kPathLengthMax else {
             NSLog("KVStorage init error: invalid path: [%@].", path)
             return nil
@@ -256,7 +257,7 @@ public final class KVStorage {
     /// - Parameter item: An item.
     /// - Returns: Whether succeed.
     @discardableResult
-    public func saveItem(_ item: KVStorageItem) -> Bool {
+func saveItem(_ item: KVStorageItem) -> Bool {
         return saveItem(withKey: item.key, value: item.value, filename: item.filename, extendedData: item.extendedData)
     }
 
@@ -270,7 +271,7 @@ public final class KVStorage {
     ///   - value: The key, should not be empty (nil or zero length).
     /// - Returns: Whether succeed.
     @discardableResult
-    public func saveItem(withKey key: String, value: Data) -> Bool {
+func saveItem(withKey key: String, value: Data) -> Bool {
         return saveItem(withKey: key, value: value, filename: nil, extendedData: nil)
     }
 
@@ -288,7 +289,7 @@ public final class KVStorage {
     ///   - extendedData: The extended data for this item (pass nil to ignore it).
     /// - Returns: Whether succeed.
     @discardableResult
-    public func saveItem(withKey key: String, value: Data, filename: String?, extendedData: Data?) -> Bool {
+func saveItem(withKey key: String, value: Data, filename: String?, extendedData: Data?) -> Bool {
         if key.isEmpty || value.isEmpty { return false }
         if type == .file && (filename == nil || filename!.isEmpty) {
             return false
@@ -321,7 +322,7 @@ public final class KVStorage {
     /// - Parameter key: The item's key.
     /// - Returns: Whether succeed.
     @discardableResult
-    public func removeItem(forKey key: String) -> Bool {
+func removeItem(forKey key: String) -> Bool {
         if key.isEmpty { return false }
         switch type {
         case .sqlite:
@@ -340,7 +341,7 @@ public final class KVStorage {
     /// - Parameter keys: An array of specified keys.
     /// - Returns: Whether succeed.
     @discardableResult
-    public func removeItem(forKeys keys: [String]) -> Bool {
+func removeItem(forKeys keys: [String]) -> Bool {
         if keys.isEmpty { return false }
         switch type {
         case .sqlite:
@@ -361,7 +362,7 @@ public final class KVStorage {
     /// - Parameter size: The maximum size in bytes.
     /// - Returns: Whether succeed.
     @discardableResult
-    public func removeItemsLargerThanSize(_ size: Int32) -> Bool {
+func removeItemsLargerThanSize(_ size: Int32) -> Bool {
         if size == Int32.max { return true }
         if size <= 0 { return removeAllItems() }
 
@@ -391,7 +392,7 @@ public final class KVStorage {
     /// - Parameter time: The specified unix timestamp.
     /// - Returns: Whether succeed.
     @discardableResult
-    public func removeItemsEarlierThanTime(_ time: Int32) -> Bool {
+func removeItemsEarlierThanTime(_ time: Int32) -> Bool {
         if time <= 0 { return true }
         if time == Int32.max { return removeAllItems() }
 
@@ -422,7 +423,7 @@ public final class KVStorage {
     /// - Parameter maxSize: The specified size in bytes.
     /// - Returns: Whether succeed.
     @discardableResult
-    public func removeItemsToFitSize(_ maxSize: Int32) -> Bool {
+func removeItemsToFitSize(_ maxSize: Int32) -> Bool {
         if maxSize == Int32.max { return true }
         if maxSize <= 0 { return removeAllItems() }
 
@@ -460,7 +461,7 @@ public final class KVStorage {
     /// - Parameter maxCount: The specified item count.
     /// - Returns: Whether succeed.
     @discardableResult
-    public func removeItemsToFitCount(_ maxCount: Int32) -> Bool {
+func removeItemsToFitCount(_ maxCount: Int32) -> Bool {
         if maxCount == Int32.max { return true }
         if maxCount <= 0 { return removeAllItems() }
 
@@ -500,7 +501,7 @@ public final class KVStorage {
     ///
     /// - Returns: Whether succeed.
     @discardableResult
-    public func removeAllItems() -> Bool {
+func removeAllItems() -> Bool {
         if !dbClose() { return false }
         reset()
         if !dbOpen() { return false }
@@ -514,7 +515,7 @@ public final class KVStorage {
     ///   - progress: This block will be invoked during removing, pass nil to ignore.
     ///   - end: This block will be invoked at the end, pass nil to ignore.
     /// - Warning: You should not send message to this instance in these blocks.
-    public func removeAllItems(
+func removeAllItems(
         progress: ((_ removedCount: Int32, _ totalCount: Int32) -> Void)?,
         end: ((_ error: Bool) -> Void)?
     ) {
@@ -555,7 +556,7 @@ public final class KVStorage {
     ///
     /// - Parameter key: A specified key.
     /// - Returns: Item for the key, or nil if not exists / error occurs.
-    public func getItem(forKey key: String) -> KVStorageItem? {
+func getItem(forKey key: String) -> KVStorageItem? {
         if key.isEmpty { return nil }
         var item = dbGetItem(withKey: key, excludeInlineData: false)
         if let theItem = item {
@@ -576,7 +577,7 @@ public final class KVStorage {
     ///
     /// - Parameter key: A specified key.
     /// - Returns: Item information for the key, or nil if not exists / error occurs.
-    public func getItemInfo(forKey key: String) -> KVStorageItem? {
+func getItemInfo(forKey key: String) -> KVStorageItem? {
         if key.isEmpty { return nil }
         return dbGetItem(withKey: key, excludeInlineData: true)
     }
@@ -585,7 +586,7 @@ public final class KVStorage {
     ///
     /// - Parameter key: A specified key.
     /// - Returns: Item's value, or nil if not exists / error occurs.
-    public func getItemValue(forKey key: String) -> Data? {
+func getItemValue(forKey key: String) -> Data? {
         if key.isEmpty { return nil }
         var value: Data?
         switch type {
@@ -622,7 +623,7 @@ public final class KVStorage {
     ///
     /// - Parameter keys: An array of specified keys.
     /// - Returns: An array of `KVStorageItem`, or nil if not exists / error occurs.
-    public func getItem(forKeys keys: [String]) -> [KVStorageItem]? {
+func getItem(forKeys keys: [String]) -> [KVStorageItem]? {
         if keys.isEmpty { return nil }
         guard var items = dbGetItem(withKeys: keys, excludeInlineData: false) else { return nil }
         if type != .sqlite {
@@ -653,7 +654,7 @@ public final class KVStorage {
     ///
     /// - Parameter keys: An array of specified keys.
     /// - Returns: An array of `KVStorageItem`, or nil if not exists / error occurs.
-    public func getItemInfo(forKeys keys: [String]) -> [KVStorageItem]? {
+func getItemInfo(forKeys keys: [String]) -> [KVStorageItem]? {
         if keys.isEmpty { return nil }
         return dbGetItem(withKeys: keys, excludeInlineData: true)
     }
@@ -663,7 +664,7 @@ public final class KVStorage {
     /// - Parameter keys: An array of specified keys.
     /// - Returns: A dictionary which key is 'key' and value is 'value', or nil if not
     ///   exists / error occurs.
-    public func getItemValue(forKeys keys: [String]) -> [String: Data]? {
+func getItemValue(forKeys keys: [String]) -> [String: Data]? {
         guard let items = getItem(forKeys: keys) else { return nil }
         var kv: [String: Data] = [:]
         for item in items {
@@ -680,7 +681,7 @@ public final class KVStorage {
     ///
     /// - Parameter key: A specified key.
     /// - Returns: `true` if there's an item exists for the key, `false` if not exists or an error occurs.
-    public func itemExists(forKey key: String) -> Bool {
+func itemExists(forKey key: String) -> Bool {
         if key.isEmpty { return false }
         return dbGetItemCount(withKey: key) > 0
     }
@@ -688,14 +689,14 @@ public final class KVStorage {
     /// Get total item count.
     ///
     /// - Returns: Total item count, -1 when an error occurs.
-    public func getItemsCount() -> Int32 {
+func getItemsCount() -> Int32 {
         return dbGetTotalItemCount()
     }
 
     /// Get item value's total size in bytes.
     ///
     /// - Returns: Total size in bytes, -1 when an error occurs.
-    public func getItemsSize() -> Int32 {
+func getItemsSize() -> Int32 {
         return dbGetTotalItemSize()
     }
 
@@ -1108,9 +1109,17 @@ public final class KVStorage {
         if result == SQLITE_ROW {
             let inlineData = sqlite3_column_blob(stmt, 0)
             let inlineDataBytes = sqlite3_column_bytes(stmt, 0)
+            // IMPORTANT: copy the blob into Data BEFORE `sqlite3_reset`, otherwise
+            // the pointer returned by `sqlite3_column_blob` is invalidated and we'd
+            // copy garbage. See https://sqlite.org/c3ref/column_blob.html.
+            let copied: Data?
+            if inlineData == nil || inlineDataBytes <= 0 {
+                copied = nil
+            } else {
+                copied = Data(bytes: inlineData!, count: Int(inlineDataBytes))
+            }
             sqlite3_reset(stmt)
-            if inlineData == nil || inlineDataBytes <= 0 { return nil }
-            return Data(bytes: inlineData!, count: Int(inlineDataBytes))
+            return copied
         } else {
             if result != SQLITE_DONE {
                 if errorLogsEnabled {

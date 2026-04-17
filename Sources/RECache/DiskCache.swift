@@ -19,36 +19,15 @@
 //  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 //  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 //  THE SOFTWARE.
-//
 
+import Foundation
+import CryptoKit
 #if canImport(UIKit)
 import UIKit
 #endif
-// `@preconcurrency` is required because we expose block-based APIs that pass
-// `NSCoding?` values through `@Sendable` async closures. `NSCoding` is an
-// `@objc` protocol that does not conform to `Sendable`, yet the common concrete
-// implementations (`NSString`, `NSNumber`, `NSData`, ...) are effectively
-// immutable value types and are safe to hand off across threads in practice.
-// Removal plan: drop once all public APIs either become `async`, take only
-// `Sendable` payloads, or Foundation's `NSCoding` gains `Sendable` conformance.
-@preconcurrency import Foundation
-import CryptoKit
-import ObjectiveC.runtime
 
-// MARK: - Associated object key
+// MARK: - Free disk space helper
 
-/// Key for the extended data associated object.
-///
-/// Safety invariant: the stored byte is never read or written. Only its
-/// **address** is used as a unique key for `objc_setAssociatedObject` /
-/// `objc_getAssociatedObject`. The Swift language forbids taking `&` of a
-/// `let`, so this must be a `var`; `nonisolated(unsafe)` is sound because no
-/// data-race on the value can ever occur.
-nonisolated(unsafe) private var kExtendedDataKey: UInt8 = 0
-
-// MARK: - Helpers
-
-/// Free disk space in bytes.
 private func diskSpaceFree() -> Int64 {
     do {
         let attrs = try FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())
@@ -60,163 +39,145 @@ private func diskSpaceFree() -> Int64 {
     }
 }
 
-/// String's md5 hash. Used only to generate a stable file name from a key;
-/// not used in a security context.
+/// MD5 hash of a string. Used only as a stable filename; not security-sensitive.
 private func stringMD5(_ string: String) -> String {
     let digest = Insecure.MD5.hash(data: Data(string.utf8))
     return digest.reduce(into: "") { $0 += String(format: "%02x", $1) }
 }
 
-// MARK: - Global instances (weak)
+// MARK: - Entry header
+//
+// Every disk blob is prefixed with a fixed 18-byte header carrying the
+// per-entry expiration policy and the high-resolution write date. The header is
+// transparent to `Transformer` — only `Transformer`'s payload is written past
+// the header, and only that payload is passed back to `Transformer.decode`.
+//
+// Layout (host byte order, little-endian on Apple platforms):
+//   byte 0        : format version (0x02)
+//   byte 1        : expiration case  (0 = never, 1 = seconds, 2 = date)
+//   bytes 2..<10  : Float64 expiration payload
+//                   — .seconds → TTL in seconds
+//                   — .date    → absolute `timeIntervalSince1970`
+//                   — .never   → unused
+//   bytes 10..<18 : Float64 write date (`timeIntervalSince1970`)
+//
+// The high-resolution writeDate avoids the sub-second truncation of
+// `KVStorage.modTime` (Int32 Unix seconds) for expiration math.
 
-/// Weakly-referenced cache of all live `DiskCache` instances, keyed by path.
-/// Using file-level `let` gives us thread-safe lazy initialization, equivalent
-/// to the `dispatch_once` pattern used by `YYDiskCache`.
-///
-/// Safety invariant: every read / write of `globalInstances` happens while
-/// `globalInstancesLock` is held (see `diskCacheGetGlobal` /
-/// `diskCacheSetGlobal`). `NSMapTable` is not `Sendable`, but the mutex
-/// makes cross-thread access race-free. `nonisolated(unsafe)` documents that
-/// the compiler can't verify this — the callers must.
-/// Removal plan: replace with an `actor`-backed registry (or a
-/// `ManagedAtomic<NSMapTable>` once available) if the public API ever becomes
-/// async; a sync `init?` can't be satisfied by an actor today.
-private let globalInstancesLock = DispatchSemaphore(value: 1)
-nonisolated(unsafe) private let globalInstances: NSMapTable<NSString, DiskCache> = NSMapTable(
-    keyOptions: .strongMemory,
-    valueOptions: .weakMemory
-)
+private enum EntryHeader {
+    static let size = 18
+    static let version: UInt8 = 2
 
-private func diskCacheGetGlobal(_ path: String) -> DiskCache? {
-    if path.isEmpty { return nil }
-    globalInstancesLock.wait()
-    defer { globalInstancesLock.signal() }
-    return globalInstances.object(forKey: path as NSString)
-}
+    private static func putDouble(_ value: Double, into data: inout Data, at offset: Int) {
+        var v = value
+        withUnsafeBytes(of: &v) { bytes in
+            for i in 0..<8 { data[offset + i] = bytes[i] }
+        }
+    }
 
-private func diskCacheSetGlobal(_ cache: DiskCache) {
-    if cache.path.isEmpty { return }
-    globalInstancesLock.wait()
-    defer { globalInstancesLock.signal() }
-    globalInstances.setObject(cache, forKey: cache.path as NSString)
+    private static func readDouble(_ data: Data, at offset: Int) -> Double {
+        var value: Double = 0
+        withUnsafeMutableBytes(of: &value) { buf in
+            for i in 0..<8 { buf[i] = data[offset + i] }
+        }
+        return value
+    }
+
+    static func encode(_ expiration: Expiration, writeDate: Date) -> Data {
+        var data = Data(count: size)
+        data[0] = version
+        switch expiration {
+        case .never:
+            data[1] = 0
+        case .seconds(let seconds):
+            data[1] = 1
+            putDouble(seconds, into: &data, at: 2)
+        case .date(let date):
+            data[1] = 2
+            putDouble(date.timeIntervalSince1970, into: &data, at: 2)
+        }
+        putDouble(writeDate.timeIntervalSince1970, into: &data, at: 10)
+        return data
+    }
+
+    /// Returns `(expiration, writeDate, payload)` or `nil` if the blob is not in
+    /// our format.
+    static func decode(_ data: Data) -> (expiration: Expiration, writeDate: Date, payload: Data)? {
+        guard data.count >= size, data[data.startIndex] == version else { return nil }
+        let base = data.startIndex
+        let caseByte = data[base + 1]
+        let expirationValue = readDouble(data, at: base + 2)
+        let writeTime = readDouble(data, at: base + 10)
+        let expiration: Expiration
+        switch caseByte {
+        case 0: expiration = .never
+        case 1: expiration = .seconds(expirationValue)
+        case 2: expiration = .date(Date(timeIntervalSince1970: expirationValue))
+        default: return nil
+        }
+        let payload = data.subdata(in: (base + size)..<data.endIndex)
+        return (expiration, Date(timeIntervalSince1970: writeTime), payload)
+    }
 }
 
 // MARK: - DiskCache
 
-/// DiskCache is a thread-safe cache that stores key-value pairs backed by SQLite
-/// and file system (similar to NSURLCache's disk cache).
+/// `DiskCache` is a thread-safe, generic, LRU cache backed by SQLite + the
+/// file system (the same dual-storage scheme pioneered by `YYDiskCache`:
+/// small blobs live in SQLite, large blobs spill to standalone files).
 ///
-/// DiskCache has these features:
+/// Values are serialized via a user-supplied ``Transformer``.
 ///
-/// * It use LRU (least-recently-used) to remove objects.
-/// * It can be controlled by cost, count, and age.
-/// * It can be configured to automatically evict objects when there's no free disk space.
-/// * It can automatically decide the storage type (sqlite/file) for each object to get
-///      better performance.
-///
-/// You may compile the latest version of sqlite and ignore the libsqlite3.dylib in
-/// iOS system to get 2x~4x speed up.
-///
-/// Concurrency:
-/// `@unchecked Sendable` is required because the class holds non-`Sendable`
-/// stored properties (`KVStorage`, custom archive / unarchive / filename
-/// closures, `name`) that are mutated after construction. Safety is provided
-/// by the following invariants, equivalent to the `Lock()` / `Unlock()` macros
-/// of `YYDiskCache`:
-///
-/// * All access to `kv`, and to any limit / name / custom-block property read
-///   inside the mutating code paths (`setObject`, `object(forKey:)`,
-///   `removeObject`, `removeAllObjects`, `trim*`, `errorLogsEnabled`,
-///   `appWillBeTerminated`) is performed while `lock` is held.
-/// * `customArchiveBlock`, `customUnarchiveBlock`, `customFileNameBlock`
-///   and `name` follow the "configure once, use after" convention of the
-///   original `YYDiskCache`; assigning them from multiple threads
-///   concurrently is not supported.
-///
-/// Removal plan: revisit once the public, synchronous Objective-C–style API
-/// can be replaced by an `actor`-based, `async` surface. A direct `actor`
-/// migration would force every caller to `await`, breaking 1:1 compatibility
-/// with `YYDiskCache`; keep `@unchecked Sendable` until that trade-off is
-/// acceptable.
-public final class DiskCache: @unchecked Sendable {
+/// ### Concurrency
+/// `@unchecked Sendable`: all access to the underlying `KVStorage` is
+/// serialized by ``lock`` (a `DispatchSemaphore`). Mutable public properties
+/// follow the YYCache "configure once, use after" convention — concurrent
+/// mutation from multiple threads is not supported.
+public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchecked Sendable {
 
     // MARK: - Attribute
 
-    /// The name of the cache. Default is nil.
+    /// The name of the cache. Default: `nil`.
     public var name: String?
 
-    /// The path of the cache (read-only).
+    /// The path of the cache directory (read-only).
     public let path: String
 
-    /// If the object's data size (in bytes) is larger than this value, then object will
-    /// be stored as a file, otherwise the object will be stored in sqlite.
+    /// Values larger than this (in bytes, **after** encoding + header) are
+    /// stored as standalone files; smaller values live inline in SQLite.
     ///
-    /// 0 means all objects will be stored as separated files, `UInt.max` means all
-    /// objects will be stored in sqlite.
-    ///
-    /// The default value is 20480 (20KB).
+    /// `0` → always file; `UInt.max` → always SQLite.
+    /// Default: `20480` (20KB).
     public let inlineThreshold: UInt
 
-    /// If this block is not nil, then the block will be used to archive object instead
-    /// of NSKeyedArchiver. You can use this block to support the objects which do not
-    /// conform to the `NSCoding` protocol.
-    ///
-    /// The default value is nil.
-    public var customArchiveBlock: ((Any) -> Data?)?
+    /// Value serializer. Set at init and never changed.
+    public let transformer: Transformer<Value>
 
-    /// If this block is not nil, then the block will be used to unarchive object instead
-    /// of NSKeyedUnarchiver. You can use this block to support the objects which do not
-    /// conform to the `NSCoding` protocol.
-    ///
-    /// The default value is nil.
-    public var customUnarchiveBlock: ((Data) -> Any?)?
+    /// Custom filename for a given key. If `nil`, `md5(String(describing: key))`
+    /// is used. Default: `nil`.
+    public var fileNameProvider: (@Sendable (Key) -> String)?
 
-    /// When an object needs to be saved as a file, this block will be invoked to generate
-    /// a file name for a specified key. If the block is nil, the cache use md5(key) as
-    /// default file name.
-    ///
-    /// The default value is nil.
-    public var customFileNameBlock: ((String) -> String?)?
+    // MARK: - Limits
 
-    // MARK: - Limit
+    /// Maximum number of entries. Default: `Int.max`. Soft limit.
+    public var countLimit: Int = .max
 
-    /// The maximum number of objects the cache should hold.
-    ///
-    /// The default value is `UInt.max`, which means no limit.
-    /// This is not a strict limit — if the cache goes over the limit, some objects in the
-    /// cache could be evicted later in background queue.
-    public var countLimit: UInt = .max
+    /// Maximum total cost (bytes on disk). Default: `Int.max`. Soft limit.
+    public var costLimit: Int = .max
 
-    /// The maximum total cost that the cache can hold before it starts evicting objects.
-    ///
-    /// The default value is `UInt.max`, which means no limit.
-    /// This is not a strict limit — if the cache goes over the limit, some objects in the
-    /// cache could be evicted later in background queue.
-    public var costLimit: UInt = .max
+    /// Default expiration policy applied to all entries. Individual entries may
+    /// override via ``set(_:forKey:extendedData:expiration:)``.
+    public var expiration: Expiration = .never
 
-    /// The maximum expiry time of objects in cache.
-    ///
-    /// The default value is `.greatestFiniteMagnitude`, which means no limit.
-    /// This is not a strict limit — if an object goes over the limit, the objects could
-    /// be evicted later in background queue.
-    public var ageLimit: TimeInterval = .greatestFiniteMagnitude
+    /// The cache will evict until free disk space is at or above this
+    /// threshold (bytes). `0` means no such limit. Default: `0`.
+    public var freeDiskSpaceLimit: UInt64 = 0
 
-    /// The minimum free disk space (in bytes) which the cache should kept.
-    ///
-    /// The default value is 0, which means no limit.
-    /// If the free disk space is lower than this value, the cache will remove objects
-    /// to free some disk space. This is not a strict limit—if the free disk space goes
-    /// over the limit, the objects could be evicted later in background queue.
-    public var freeDiskSpaceLimit: UInt = 0
-
-    /// The auto trim check time interval in seconds. Default is 60 (1 minute).
-    ///
-    /// The cache holds an internal timer to check whether the cache reaches
-    /// its limits, and if the limit is reached, it begins to evict objects.
+    /// Auto-trim check interval in seconds. Default: `60`.
     public var autoTrimInterval: TimeInterval = 60
 
-    /// Set `true` to enable error logs for debug.
-    public var errorLogsEnabled: Bool {
+    /// If `true`, KVStorage prints error logs. Default: `false`.
+    public var isLoggingEnabled: Bool {
         get {
             lock.wait()
             defer { lock.signal() }
@@ -229,7 +190,7 @@ public final class DiskCache: @unchecked Sendable {
         }
     }
 
-    // MARK: - Private Properties
+    // MARK: - Private state
 
     private var kv: KVStorage?
     private let lock = DispatchSemaphore(value: 1)
@@ -238,37 +199,16 @@ public final class DiskCache: @unchecked Sendable {
     private var terminateObserver: (any NSObjectProtocol)?
     #endif
 
-    // MARK: - Initializer
+    // MARK: - Init
 
-    /// Create a new cache based on the specified path.
-    ///
-    /// - Parameter path: Full path of a directory in which the cache will write data.
-    ///   Once initialized you should not read and write to this directory.
-    /// - Warning: If the cache instance for the specified path already exists in memory,
-    ///   prefer `DiskCache.shared(path:)` so you can reuse the existing instance. Swift
-    ///   initializers cannot substitute `self` with an already-created instance the way
-    ///   `YYDiskCache` does in Objective-C.
-    public convenience init?(path: String) {
-        self.init(path: path, inlineThreshold: 1024 * 20)
-    }
-
-    /// The designated initializer. Returns a new cache object, or nil if an error occurs.
-    ///
     /// - Parameters:
-    ///   - path: Full path of a directory in which the cache will write data.
-    ///     Once initialized you should not read and write to this directory.
-    ///   - inlineThreshold: The data store inline threshold in bytes. If the object's
-    ///     data size (in bytes) is larger than this value, then object will be stored
-    ///     as a file, otherwise the object will be stored in sqlite. 0 means all objects
-    ///     will be stored as separated files, `UInt.max` means all objects will be
-    ///     stored in sqlite. If you don't know your object's size, 20480 is a good
-    ///     choice. After first initialized you should not change this value of the
-    ///     specified path.
-    /// - Warning: If the cache instance for the specified path already exists in memory,
-    ///   prefer `DiskCache.shared(path:inlineThreshold:)` so you can reuse the existing
-    ///   instance. Swift initializers cannot substitute `self` with an already-created
-    ///   instance the way `YYDiskCache` does in Objective-C.
-    public init?(path: String, inlineThreshold: UInt) {
+    ///   - path: Full directory path where the cache will write data. Once
+    ///     initialized, do not read / write this directory from outside.
+    ///   - transformer: Serializer used to convert `Value` ↔ `Data`.
+    ///   - inlineThreshold: See ``inlineThreshold``. Default `20480` (20KB).
+    public init?(path: String, transformer: Transformer<Value>, inlineThreshold: UInt = 20480) {
+        if path.isEmpty { return nil }
+
         let type: KVStorageType
         if inlineThreshold == 0 {
             type = .file
@@ -283,10 +223,12 @@ public final class DiskCache: @unchecked Sendable {
         self.kv = kv
         self.path = path
         self.inlineThreshold = inlineThreshold
+        self.transformer = transformer
         self.queue = DispatchQueue(label: "com.reers.cache.disk", attributes: .concurrent)
 
+        kv.errorLogsEnabled = false
+
         trimRecursively()
-        diskCacheSetGlobal(self)
 
         #if canImport(UIKit) && !os(watchOS)
         terminateObserver = NotificationCenter.default.addObserver(
@@ -299,30 +241,6 @@ public final class DiskCache: @unchecked Sendable {
         #endif
     }
 
-    /// Returns an existing live `DiskCache` instance for the given path if one exists,
-    /// otherwise creates and returns a new instance. This mirrors the deduplication
-    /// behavior of `YYDiskCache`'s `initWithPath:` in a Swift-friendly way.
-    ///
-    /// - Parameter path: Full path of a directory in which the cache will write data.
-    /// - Returns: A cache object, or nil if an error occurs.
-    public static func shared(path: String) -> DiskCache? {
-        return shared(path: path, inlineThreshold: 1024 * 20)
-    }
-
-    /// Returns an existing live `DiskCache` instance for the given path if one exists,
-    /// otherwise creates and returns a new instance. This mirrors the deduplication
-    /// behavior of `YYDiskCache`'s `initWithPath:inlineThreshold:` in a Swift-friendly
-    /// way.
-    ///
-    /// - Parameters:
-    ///   - path: Full path of a directory in which the cache will write data.
-    ///   - inlineThreshold: The data store inline threshold in bytes.
-    /// - Returns: A cache object, or nil if an error occurs.
-    public static func shared(path: String, inlineThreshold: UInt) -> DiskCache? {
-        if let existing = diskCacheGetGlobal(path) { return existing }
-        return DiskCache(path: path, inlineThreshold: inlineThreshold)
-    }
-
     deinit {
         #if canImport(UIKit) && !os(watchOS)
         if let observer = terminateObserver {
@@ -331,7 +249,362 @@ public final class DiskCache: @unchecked Sendable {
         #endif
     }
 
-    // MARK: - Private Trim
+    // MARK: - Sync API
+
+    /// Returns whether a non-expired entry exists for `key`.
+    public func contains(_ key: Key) -> Bool {
+        if isKeyInvalid(key) { return false }
+        let k = stringKey(for: key)
+        let now = Date()
+
+        lock.wait()
+        let item = kv?.getItemInfo(forKey: k)
+        lock.signal()
+
+        guard let item else { return false }
+        // Decode expiration from extendedData? No — from the value header. But
+        // getItemInfo doesn't load inline data, so we can't parse the header
+        // without a full read. Fall back to modTime-based "cache-level expiration"
+        // check for this fast path.
+        let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
+        if expiration.isExpired(writtenAt: writeDate, now: now) {
+            lock.wait()
+            kv?.removeItem(forKey: k)
+            lock.signal()
+            return false
+        }
+        return true
+    }
+
+    /// Returns the value for `key`, or `nil` if absent / expired.
+    ///
+    /// - Throws: ``CacheError/decodingFailed(_:)`` if the stored blob exists
+    ///   but the transformer rejects it.
+    public func value(forKey key: Key) throws -> Value? {
+        if isKeyInvalid(key) { return nil }
+        let k = stringKey(for: key)
+
+        lock.wait()
+        let item = kv?.getItem(forKey: k)
+        lock.signal()
+
+        guard let item, !item.value.isEmpty else { return nil }
+
+        guard let decoded = EntryHeader.decode(item.value) else {
+            // Unknown format — treat as corrupted, remove.
+            lock.wait()
+            kv?.removeItem(forKey: k)
+            lock.signal()
+            return nil
+        }
+
+        let effectiveExpiration = (decoded.expiration == .never) ? expiration : decoded.expiration
+        if effectiveExpiration.isExpired(writtenAt: decoded.writeDate, now: Date()) {
+            lock.wait()
+            kv?.removeItem(forKey: k)
+            lock.signal()
+            return nil
+        }
+
+        return try transformer.decode(decoded.payload)
+    }
+
+    /// Returns the extended data associated with `key`, without reading
+    /// (or decoding) the main value. Cheap — only hits SQLite.
+    public func extendedData(forKey key: Key) -> Data? {
+        if isKeyInvalid(key) { return nil }
+        let k = stringKey(for: key)
+        lock.wait()
+        defer { lock.signal() }
+        return kv?.getItemInfo(forKey: k)?.extendedData
+    }
+
+    /// Returns `(value, extendedData)` for `key`, or `nil` if absent / expired.
+    public func valueWithExtendedData(forKey key: Key) throws -> (value: Value, extendedData: Data?)? {
+        if isKeyInvalid(key) { return nil }
+        let k = stringKey(for: key)
+
+        lock.wait()
+        let item = kv?.getItem(forKey: k)
+        lock.signal()
+
+        guard let item, !item.value.isEmpty else { return nil }
+        guard let decoded = EntryHeader.decode(item.value) else {
+            lock.wait()
+            kv?.removeItem(forKey: k)
+            lock.signal()
+            return nil
+        }
+        let effectiveExpiration = (decoded.expiration == .never) ? expiration : decoded.expiration
+        if effectiveExpiration.isExpired(writtenAt: decoded.writeDate, now: Date()) {
+            lock.wait()
+            kv?.removeItem(forKey: k)
+            lock.signal()
+            return nil
+        }
+        let value = try transformer.decode(decoded.payload)
+        return (value, item.extendedData)
+    }
+
+    /// Stores `value` for `key`.
+    ///
+    /// - Parameters:
+    ///   - value: Value to cache. Pass `nil` to remove.
+    ///   - key: Key.
+    ///   - extendedData: Optional opaque metadata (e.g. image decoding hints,
+    ///     ETag, source URL) stored alongside the value without affecting
+    ///     the transformer.
+    ///   - expiration: Per-entry expiration. When `nil` the cache-level ``expiration``
+    ///     applies at read time.
+    /// - Throws: ``CacheError/encodingFailed(_:)`` if the transformer rejects
+    ///   the value; ``CacheError/writeFailed`` on disk errors.
+    public func set(
+        _ value: Value?,
+        forKey key: Key,
+        extendedData: Data? = nil,
+        expiration: Expiration? = nil
+    ) throws {
+        if isKeyInvalid(key) { return }
+        guard let value = value else {
+            remove(forKey: key)
+            return
+        }
+
+        let payload: Data = try transformer.encode(value)
+        var blob = EntryHeader.encode(expiration ?? .never, writeDate: Date())
+        blob.append(payload)
+
+        let k = stringKey(for: key)
+        var fname: String?
+        if kv?.type != .sqlite {
+            if UInt(blob.count) > inlineThreshold {
+                fname = filename(for: key)
+            }
+        }
+
+        lock.wait()
+        let ok = kv?.saveItem(withKey: k, value: blob, filename: fname, extendedData: extendedData) ?? false
+        lock.signal()
+
+        if !ok { throw CacheError.writeFailed }
+    }
+
+    /// Removes the entry for `key`, if any.
+    public func remove(forKey key: Key) {
+        if isKeyInvalid(key) { return }
+        let k = stringKey(for: key)
+        lock.wait()
+        kv?.removeItem(forKey: k)
+        lock.signal()
+    }
+
+    /// Empties the cache.
+    public func removeAll() {
+        lock.wait()
+        kv?.removeAllItems()
+        lock.signal()
+    }
+
+    /// Empties the cache, reporting progress.
+    public func removeAll(
+        progress: (@Sendable (_ removed: Int32, _ total: Int32) -> Void)?,
+        completion: (@Sendable (_ error: Bool) -> Void)?
+    ) {
+        queue.async { [weak self] in
+            guard let self else {
+                completion?(true)
+                return
+            }
+            lock.wait()
+            kv?.removeAllItems(progress: progress, end: completion)
+            lock.signal()
+        }
+    }
+
+    /// Removes entries whose cache-level expiration has passed. Per-entry
+    /// expiration is not visible here (would require reading each value blob);
+    /// it is enforced at read time in ``value(forKey:)``.
+    public func removeExpired() {
+        guard case .seconds(let seconds) = expiration else {
+            if case .date(let date) = expiration {
+                lock.wait()
+                if Date() >= date {
+                    kv?.removeAllItems()
+                }
+                lock.signal()
+            }
+            return
+        }
+        let now = TimeInterval(time(nil))
+        if now <= seconds { return }
+        let cutoff = now - seconds
+        if cutoff >= TimeInterval(Int32.max) { return }
+        lock.wait()
+        kv?.removeItemsEarlierThanTime(Int32(cutoff))
+        lock.signal()
+    }
+
+    // MARK: - Trim
+
+    /// Evicts LRU entries until the total count ≤ `limit`.
+    public func trim(toCount limit: Int) {
+        lock.wait()
+        _trimToCount(limit)
+        lock.signal()
+    }
+
+    /// Evicts LRU entries until the total cost (bytes) ≤ `limit`.
+    public func trim(toCost limit: Int) {
+        lock.wait()
+        _trimToCost(limit)
+        lock.signal()
+    }
+
+    // MARK: - Status
+
+    public func totalCount() -> Int {
+        lock.wait()
+        defer { lock.signal() }
+        return Int(kv?.getItemsCount() ?? 0)
+    }
+
+    public func totalCost() -> Int {
+        lock.wait()
+        defer { lock.signal() }
+        return Int(kv?.getItemsSize() ?? 0)
+    }
+
+    // MARK: - Async API
+
+    public func asyncContains(_ key: Key) async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            queue.async { [weak self] in
+                continuation.resume(returning: self?.contains(key) ?? false)
+            }
+        }
+    }
+
+    public func asyncValue(forKey key: Key) async throws -> Value? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Value?, any Error>) in
+            queue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                do {
+                    let result = try value(forKey: key)
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    public func asyncValueWithExtendedData(
+        forKey key: Key
+    ) async throws -> (value: Value, extendedData: Data?)? {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<(value: Value, extendedData: Data?)?, any Error>) in
+            queue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                do {
+                    let result = try valueWithExtendedData(forKey: key)
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    public func asyncExtendedData(forKey key: Key) async -> Data? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Data?, Never>) in
+            queue.async { [weak self] in
+                continuation.resume(returning: self?.extendedData(forKey: key))
+            }
+        }
+    }
+
+    public func asyncSet(
+        _ value: Value?,
+        forKey key: Key,
+        extendedData: Data? = nil,
+        expiration: Expiration? = nil
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            queue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(throwing: CacheError.storageUnavailable)
+                    return
+                }
+                do {
+                    try set(value, forKey: key, extendedData: extendedData, expiration: expiration)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    public func asyncRemove(forKey key: Key) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { [weak self] in
+                self?.remove(forKey: key)
+                continuation.resume()
+            }
+        }
+    }
+
+    public func asyncRemoveAll() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { [weak self] in
+                self?.removeAll()
+                continuation.resume()
+            }
+        }
+    }
+
+    public func asyncRemoveExpired() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { [weak self] in
+                self?.removeExpired()
+                continuation.resume()
+            }
+        }
+    }
+
+    // MARK: - Private
+
+    @inline(__always)
+    private func isKeyInvalid(_ key: Key) -> Bool {
+        if let k = key as? String, k.isEmpty { return true }
+        return false
+    }
+
+    @inline(__always)
+    private func stringKey(for key: Key) -> String {
+        if let k = key as? String { return k }
+        return String(describing: key)
+    }
+
+    private func filename(for key: Key) -> String {
+        if let provider = fileNameProvider {
+            let name = provider(key)
+            if !name.isEmpty { return name }
+        }
+        return stringMD5(stringKey(for: key))
+    }
+
+    private func appWillBeTerminated() {
+        lock.wait()
+        kv = nil
+        lock.signal()
+    }
 
     private func trimRecursively() {
         DispatchQueue
@@ -349,434 +622,54 @@ public final class DiskCache: @unchecked Sendable {
             lock.wait()
             _trimToCost(costLimit)
             _trimToCount(countLimit)
-            _trimToAge(ageLimit)
+            _trimToExpiration()
             _trimToFreeDiskSpace(freeDiskSpaceLimit)
             lock.signal()
         }
     }
 
-    private func _trimToCost(_ costLimit: UInt) {
-        if costLimit >= UInt(Int32.max) { return }
-        kv?.removeItemsToFitSize(Int32(costLimit))
+    private func _trimToCost(_ limit: Int) {
+        if limit >= Int(Int32.max) { return }
+        kv?.removeItemsToFitSize(Int32(limit))
     }
 
-    private func _trimToCount(_ countLimit: UInt) {
-        if countLimit >= UInt(Int32.max) { return }
-        kv?.removeItemsToFitCount(Int32(countLimit))
+    private func _trimToCount(_ limit: Int) {
+        if limit >= Int(Int32.max) { return }
+        kv?.removeItemsToFitCount(Int32(limit))
     }
 
-    private func _trimToAge(_ ageLimit: TimeInterval) {
-        if ageLimit <= 0 {
-            kv?.removeAllItems()
+    private func _trimToExpiration() {
+        switch expiration {
+        case .never:
             return
+        case .seconds(let seconds):
+            if seconds <= 0 {
+                kv?.removeAllItems()
+                return
+            }
+            let now = TimeInterval(time(nil))
+            if now <= seconds { return }
+            let cutoff = now - seconds
+            if cutoff >= TimeInterval(Int32.max) { return }
+            kv?.removeItemsEarlierThanTime(Int32(cutoff))
+        case .date(let date):
+            if Date() >= date {
+                kv?.removeAllItems()
+            }
         }
-        let timestamp = TimeInterval(time(nil))
-        if timestamp <= ageLimit { return }
-        let age = timestamp - ageLimit
-        if age >= TimeInterval(Int32.max) { return }
-        kv?.removeItemsEarlierThanTime(Int32(age))
     }
 
-    private func _trimToFreeDiskSpace(_ targetFreeDiskSpace: UInt) {
-        if targetFreeDiskSpace == 0 { return }
+    private func _trimToFreeDiskSpace(_ target: UInt64) {
+        if target == 0 { return }
         let totalBytes = Int64(kv?.getItemsSize() ?? 0)
         if totalBytes <= 0 { return }
-        let diskFreeBytes = diskSpaceFree()
-        if diskFreeBytes < 0 { return }
-        let needTrimBytes = Int64(targetFreeDiskSpace) - diskFreeBytes
-        if needTrimBytes <= 0 { return }
-        var costLimit = totalBytes - needTrimBytes
+        let free = diskSpaceFree()
+        if free < 0 { return }
+        let needTrim = Int64(target) - free
+        if needTrim <= 0 { return }
+        var costLimit = totalBytes - needTrim
         if costLimit < 0 { costLimit = 0 }
-        _trimToCost(UInt(costLimit))
-    }
-
-    private func filenameForKey(_ key: String) -> String {
-        if let customFileNameBlock = customFileNameBlock,
-           let filename = customFileNameBlock(key),
-           !filename.isEmpty {
-            return filename
-        }
-        return stringMD5(key)
-    }
-
-    private func appWillBeTerminated() {
-        lock.wait()
-        kv = nil
-        lock.signal()
-    }
-
-    // MARK: - Access Methods
-
-    /// Returns a boolean value that indicates whether a given key is in cache.
-    /// This method may blocks the calling thread until file read finished.
-    ///
-    /// - Parameter key: A string identifying the value. If empty, just return `false`.
-    /// - Returns: Whether the key is in cache.
-    public func containsObject(forKey key: String) -> Bool {
-        if key.isEmpty { return false }
-        lock.wait()
-        defer { lock.signal() }
-        return kv?.itemExists(forKey: key) ?? false
-    }
-
-    /// Returns a boolean value with the block that indicates whether a given key is in cache.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameters:
-    ///   - key: A string identifying the value. If empty, just return `false`.
-    ///   - block: A block which will be invoked in background queue when finished.
-    public func containsObject(forKey key: String, block: @escaping @Sendable (_ key: String, _ contains: Bool) -> Void) {
-        queue.async { [weak self] in
-            guard let self else {
-                block(key, false)
-                return
-            }
-            let contains = containsObject(forKey: key)
-            block(key, contains)
-        }
-    }
-
-    /// Returns the value associated with a given key.
-    /// This method may blocks the calling thread until file read finished.
-    ///
-    /// - Parameter key: A string identifying the value. If empty, just return nil.
-    /// - Returns: The value associated with key, or nil if no value is associated with key.
-    public func object(forKey key: String) -> NSCoding? {
-        if key.isEmpty { return nil }
-        lock.wait()
-        let item = kv?.getItem(forKey: key)
-        lock.signal()
-        guard let item = item, !item.value.isEmpty else { return nil }
-
-        var object: Any?
-        if let customUnarchiveBlock = customUnarchiveBlock {
-            object = customUnarchiveBlock(item.value)
-        } else {
-            do {
-                let unarchiver = try NSKeyedUnarchiver(forReadingFrom: item.value)
-                unarchiver.requiresSecureCoding = false
-                object = unarchiver.decodeObject(forKey: NSKeyedArchiveRootObjectKey)
-                unarchiver.finishDecoding()
-            } catch {
-                // nothing to do...
-            }
-        }
-        if let object = object as AnyObject?, let extendedData = item.extendedData {
-            DiskCache.setExtendedData(extendedData, to: object)
-        }
-        return object as? NSCoding
-    }
-
-    /// Returns the value associated with a given key.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameters:
-    ///   - key: A string identifying the value. If empty, just return nil.
-    ///   - block: A block which will be invoked in background queue when finished.
-    public func object(forKey key: String, block: @escaping @Sendable (_ key: String, _ object: NSCoding?) -> Void) {
-        queue.async { [weak self] in
-            guard let self else {
-                block(key, nil)
-                return
-            }
-            let object = object(forKey: key)
-            block(key, object)
-        }
-    }
-
-    /// Sets the value of the specified key in the cache.
-    /// This method may blocks the calling thread until file write finished.
-    ///
-    /// - Parameters:
-    ///   - object: The object to be stored in the cache. If nil, it calls `removeObject(forKey:)`.
-    ///   - key: The key with which to associate the value. If empty, this method has no effect.
-    public func setObject(_ object: NSCoding?, forKey key: String) {
-        if key.isEmpty { return }
-        guard let object = object else {
-            removeObject(forKey: key)
-            return
-        }
-
-        let extendedData = DiskCache.getExtendedData(from: object)
-        var value: Data?
-        if let customArchiveBlock = customArchiveBlock {
-            value = customArchiveBlock(object)
-        } else {
-            do {
-                value = try NSKeyedArchiver.archivedData(withRootObject: object, requiringSecureCoding: false)
-            } catch {
-                // nothing to do...
-            }
-        }
-        guard let value = value else { return }
-
-        var filename: String?
-        if kv?.type != .sqlite {
-            if UInt(value.count) > inlineThreshold {
-                filename = filenameForKey(key)
-            }
-        }
-
-        lock.wait()
-        kv?.saveItem(withKey: key, value: value, filename: filename, extendedData: extendedData)
-        lock.signal()
-    }
-
-    /// Sets the value of the specified key in the cache.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameters:
-    ///   - object: The object to be stored in the cache. If nil, it calls `removeObject(forKey:)`.
-    ///   - key: The key with which to associate the value. If empty, this method has no effect.
-    ///   - block: A block which will be invoked in background queue when finished.
-    public func setObject(_ object: NSCoding?, forKey key: String, block: (@Sendable () -> Void)?) {
-        queue.async { [weak self] in
-            guard let self else {
-                block?()
-                return
-            }
-            setObject(object, forKey: key)
-            block?()
-        }
-    }
-
-    /// Removes the value of the specified key in the cache.
-    /// This method may blocks the calling thread until file delete finished.
-    ///
-    /// - Parameter key: The key identifying the value to be removed. If empty, this method has no effect.
-    public func removeObject(forKey key: String) {
-        if key.isEmpty { return }
-        lock.wait()
-        kv?.removeItem(forKey: key)
-        lock.signal()
-    }
-
-    /// Removes the value of the specified key in the cache.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameters:
-    ///   - key: The key identifying the value to be removed. If empty, this method has no effect.
-    ///   - block: A block which will be invoked in background queue when finished.
-    public func removeObject(forKey key: String, block: (@Sendable (_ key: String) -> Void)?) {
-        queue.async { [weak self] in
-            guard let self else {
-                block?(key)
-                return
-            }
-            removeObject(forKey: key)
-            block?(key)
-        }
-    }
-
-    /// Empties the cache.
-    /// This method may blocks the calling thread until file delete finished.
-    public func removeAllObjects() {
-        lock.wait()
-        kv?.removeAllItems()
-        lock.signal()
-    }
-
-    /// Empties the cache.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameter block: A block which will be invoked in background queue when finished.
-    public func removeAllObjects(block: (@Sendable () -> Void)?) {
-        queue.async { [weak self] in
-            guard let self else {
-                block?()
-                return
-            }
-            removeAllObjects()
-            block?()
-        }
-    }
-
-    /// Empties the cache with block.
-    /// This method returns immediately and executes the clear operation with block in background.
-    ///
-    /// - Parameters:
-    ///   - progress: This block will be invoked during removing, pass nil to ignore.
-    ///   - end: This block will be invoked at the end, pass nil to ignore.
-    /// - Warning: You should not send message to this instance in these blocks.
-    public func removeAllObjects(
-        progress: (@Sendable (_ removedCount: Int32, _ totalCount: Int32) -> Void)?,
-        end: (@Sendable (_ error: Bool) -> Void)?
-    ) {
-        queue.async { [weak self] in
-            guard let self else {
-                end?(true)
-                return
-            }
-            lock.wait()
-            kv?.removeAllItems(progress: progress, end: end)
-            lock.signal()
-        }
-    }
-
-    /// Returns the number of objects in this cache.
-    /// This method may blocks the calling thread until file read finished.
-    ///
-    /// - Returns: The total objects count.
-    public func totalCount() -> Int {
-        lock.wait()
-        defer { lock.signal() }
-        return Int(kv?.getItemsCount() ?? 0)
-    }
-
-    /// Get the number of objects in this cache.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameter block: A block which will be invoked in background queue when finished.
-    public func totalCount(block: @escaping @Sendable (_ totalCount: Int) -> Void) {
-        queue.async { [weak self] in
-            guard let self else {
-                block(0)
-                return
-            }
-            block(totalCount())
-        }
-    }
-
-    /// Returns the total cost (in bytes) of objects in this cache.
-    /// This method may blocks the calling thread until file read finished.
-    ///
-    /// - Returns: The total objects cost in bytes.
-    public func totalCost() -> Int {
-        lock.wait()
-        defer { lock.signal() }
-        return Int(kv?.getItemsSize() ?? 0)
-    }
-
-    /// Get the total cost (in bytes) of objects in this cache.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameter block: A block which will be invoked in background queue when finished.
-    public func totalCost(block: @escaping @Sendable (_ totalCost: Int) -> Void) {
-        queue.async { [weak self] in
-            guard let self else {
-                block(0)
-                return
-            }
-            block(totalCost())
-        }
-    }
-
-    // MARK: - Trim
-
-    /// Removes objects from the cache use LRU, until the `totalCount` is below the specified value.
-    /// This method may blocks the calling thread until operation finished.
-    ///
-    /// - Parameter count: The total count allowed to remain after the cache has been trimmed.
-    public func trimToCount(_ count: UInt) {
-        lock.wait()
-        _trimToCount(count)
-        lock.signal()
-    }
-
-    /// Removes objects from the cache use LRU, until the `totalCount` is below the specified value.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameters:
-    ///   - count: The total count allowed to remain after the cache has been trimmed.
-    ///   - block: A block which will be invoked in background queue when finished.
-    public func trimToCount(_ count: UInt, block: (@Sendable () -> Void)?) {
-        queue.async { [weak self] in
-            guard let self else {
-                block?()
-                return
-            }
-            trimToCount(count)
-            block?()
-        }
-    }
-
-    /// Removes objects from the cache use LRU, until the `totalCost` is below the specified value.
-    /// This method may blocks the calling thread until operation finished.
-    ///
-    /// - Parameter cost: The total cost allowed to remain after the cache has been trimmed.
-    public func trimToCost(_ cost: UInt) {
-        lock.wait()
-        _trimToCost(cost)
-        lock.signal()
-    }
-
-    /// Removes objects from the cache use LRU, until the `totalCost` is below the specified value.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameters:
-    ///   - cost: The total cost allowed to remain after the cache has been trimmed.
-    ///   - block: A block which will be invoked in background queue when finished.
-    public func trimToCost(_ cost: UInt, block: (@Sendable () -> Void)?) {
-        queue.async { [weak self] in
-            guard let self else {
-                block?()
-                return
-            }
-            trimToCost(cost)
-            block?()
-        }
-    }
-
-    /// Removes objects from the cache use LRU, until all expiry objects removed by the specified value.
-    /// This method may blocks the calling thread until operation finished.
-    ///
-    /// - Parameter age: The maximum age of the object.
-    public func trimToAge(_ age: TimeInterval) {
-        lock.wait()
-        _trimToAge(age)
-        lock.signal()
-    }
-
-    /// Removes objects from the cache use LRU, until all expiry objects removed by the specified value.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameters:
-    ///   - age: The maximum age of the object.
-    ///   - block: A block which will be invoked in background queue when finished.
-    public func trimToAge(_ age: TimeInterval, block: (@Sendable () -> Void)?) {
-        queue.async { [weak self] in
-            guard let self else {
-                block?()
-                return
-            }
-            trimToAge(age)
-            block?()
-        }
-    }
-
-    // MARK: - Extended Data
-
-    /// Get extended data from an object.
-    ///
-    /// See `setExtendedData(_:to:)` for more information.
-    ///
-    /// - Parameter object: An object.
-    /// - Returns: The extended data.
-    public static func getExtendedData(from object: AnyObject) -> Data? {
-        return objc_getAssociatedObject(object, &kExtendedDataKey) as? Data
-    }
-
-    /// Set extended data to an object.
-    ///
-    /// You can set any extended data to an object before you save the object
-    /// to disk cache. The extended data will also be saved with this object. You can get
-    /// the extended data later with `getExtendedData(from:)`.
-    ///
-    /// - Parameters:
-    ///   - extendedData: The extended data (pass nil to remove).
-    ///   - object: The object.
-    public static func setExtendedData(_ extendedData: Data?, to object: AnyObject) {
-        objc_setAssociatedObject(object, &kExtendedDataKey, extendedData, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        _trimToCost(Int(costLimit))
     }
 }
 
@@ -784,11 +677,11 @@ public final class DiskCache: @unchecked Sendable {
 
 extension DiskCache: CustomStringConvertible {
     public var description: String {
-        let ptr = Unmanaged.passUnretained(self).toOpaque()
+        let id = ObjectIdentifier(self)
         if let name = name {
-            return "<\(type(of: self)): \(ptr)> (\(name):\(path))"
+            return "<\(type(of: self)): \(id)> (\(name):\(path))"
         } else {
-            return "<\(type(of: self)): \(ptr)> (\(path))"
+            return "<\(type(of: self)): \(id)> (\(path))"
         }
     }
 }

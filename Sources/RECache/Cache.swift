@@ -19,105 +19,55 @@
 //  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 //  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 //  THE SOFTWARE.
-//
 
-// `@preconcurrency` is required because we expose block-based APIs that pass
-// `NSCoding?` values through `@Sendable` async closures. `NSCoding` is an
-// `@objc` protocol that does not conform to `Sendable`, yet the common concrete
-// implementations (`NSString`, `NSNumber`, `NSData`, ...) are effectively
-// immutable value types and are safe to hand off across threads in practice.
-// Removal plan: drop once all public APIs either become `async`, take only
-// `Sendable` payloads, or Foundation's `NSCoding` gains `Sendable` conformance.
-@preconcurrency import Foundation
+import Foundation
 
-// MARK: - NSCoding Box
-
-/// A Sendable wrapper around `any NSCoding`.
+/// A generic, thread-safe, two-tier (memory + disk) cache.
 ///
-/// `MemoryCache` requires its `Value` type to conform to `Sendable`, but the
-/// `any NSCoding` existential does not. Wrapping the value in this box lets us
-/// use `MemoryCache<String, NSCodingBox>` as the underlying memory layer of
-/// `Cache`.
+/// `Cache` delegates to ``memoryCache`` and ``diskCache``, serving reads from
+/// memory first and repopulating memory on disk hits. Both layers share the
+/// same `Key` / `Value` and the same ``Transformer``.
 ///
-/// Safety invariant: the wrapped value is never mutated through this box and
-/// the common `NSCoding` concrete types (`NSString`, `NSNumber`, `NSData`,
-/// ...) are effectively immutable value-semantic types that are safe to hand
-/// off across threads in practice.
-public struct NSCodingBox: @unchecked Sendable {
+/// ### Concurrency
+/// `@unchecked Sendable`: the class holds two `@unchecked Sendable` sub-caches
+/// (``MemoryCache`` / ``DiskCache``), each serialized internally. No
+/// additional mutable state lives on this type.
+public final class Cache<Key: Hashable & Sendable, Value: Sendable>: @unchecked Sendable {
 
-    /// The underlying `NSCoding` value.
-    public let value: any NSCoding
-
-    /// Create a box that wraps an `NSCoding` value.
-    ///
-    /// - Parameter value: The value to wrap.
-    public init(_ value: any NSCoding) {
-        self.value = value
-    }
-}
-
-// MARK: - Cache
-
-/// `Cache` is a thread safe key-value cache.
-///
-/// It uses `MemoryCache` to store objects in a small and fast memory cache,
-/// and uses `DiskCache` to persist objects to a large and slow disk cache.
-/// See `MemoryCache` and `DiskCache` for more information.
-///
-/// Concurrency:
-/// `@unchecked Sendable` is required because the class holds non-`Sendable`
-/// stored properties (`memoryCache`'s boxed `NSCoding` values). Safety is
-/// provided by the underlying `MemoryCache` / `DiskCache`, both of which
-/// serialize access internally.
-///
-/// Removal plan: revisit once the public, synchronous Objective-C–style API
-/// can be replaced by an `actor`-based, `async` surface. A direct `actor`
-/// migration would force every caller to `await`, breaking 1:1 compatibility
-/// with `YYCache`; keep `@unchecked Sendable` until that trade-off is
-/// acceptable.
-public final class Cache: @unchecked Sendable {
-
-    // MARK: - Properties
-
-    /// The name of the cache, read-only.
+    /// The name of the cache (read-only).
     public let name: String
 
-    /// The underlying memory cache. See `MemoryCache` for more information.
-    public let memoryCache: MemoryCache<String, NSCodingBox>
+    /// The memory layer.
+    public let memoryCache: MemoryCache<Key, Value>
 
-    /// The underlying disk cache. See `DiskCache` for more information.
-    public let diskCache: DiskCache
+    /// The disk layer.
+    public let diskCache: DiskCache<Key, Value>
 
-    // MARK: - Initializer
+    // MARK: - Init
 
-    /// Create a new instance with the specified name.
-    /// Multiple instances with the same name will make the cache unstable.
+    /// Creates a cache named `name` under the user's caches directory.
     ///
-    /// - Parameter name: The name of the cache. It will create a dictionary
-    ///   with the name in the app's caches dictionary for disk cache. Once
-    ///   initialized you should not read and write to this directory.
-    public convenience init?(name: String) {
+    /// - Parameters:
+    ///   - name: Directory name for the disk layer. Must be non-empty.
+    ///   - transformer: Value serializer shared by the disk layer.
+    public convenience init?(name: String, transformer: Transformer<Value>) {
         if name.isEmpty { return nil }
-        let cacheFolder = NSSearchPathForDirectoriesInDomains(
-            .cachesDirectory,
-            .userDomainMask,
-            true
-        ).first ?? ""
-        let path = (cacheFolder as NSString).appendingPathComponent(name)
-        self.init(path: path)
+        let caches = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true).first ?? ""
+        let path = (caches as NSString).appendingPathComponent(name)
+        self.init(path: path, transformer: transformer)
     }
 
-    /// The designated initializer. Create a new instance with the specified path.
-    /// Multiple instances with the same name will make the cache unstable.
+    /// Creates a cache at `path`.
     ///
-    /// - Parameter path: Full path of a directory in which the cache will write
-    ///   data. Once initialized you should not read and write to this directory.
-    public init?(path: String) {
+    /// - Parameters:
+    ///   - path: Absolute directory path for the disk layer.
+    ///   - transformer: Value serializer shared by the disk layer.
+    public init?(path: String, transformer: Transformer<Value>) {
         if path.isEmpty { return nil }
-        guard let diskCache = DiskCache(path: path) else { return nil }
+        guard let diskCache = DiskCache<Key, Value>(path: path, transformer: transformer) else { return nil }
 
         let name = (path as NSString).lastPathComponent
-        let memoryCache = MemoryCache<String, NSCodingBox>()
+        let memoryCache = MemoryCache<Key, Value>()
         memoryCache.name = name
 
         self.name = name
@@ -125,178 +75,109 @@ public final class Cache: @unchecked Sendable {
         self.memoryCache = memoryCache
     }
 
-    // MARK: - Access Methods
+    // MARK: - Sync API
 
-    /// Returns a boolean value that indicates whether a given key is in cache.
-    /// This method may blocks the calling thread until file read finished.
-    ///
-    /// - Parameter key: A string identifying the value. If empty, just return `false`.
-    /// - Returns: Whether the key is in cache.
-    public func containsObject(forKey key: String) -> Bool {
-        return memoryCache.containsObject(forKey: key) || diskCache.containsObject(forKey: key)
+    /// Returns whether a non-expired entry exists for `key` in either layer.
+    public func contains(_ key: Key) -> Bool {
+        memoryCache.contains(key) || diskCache.contains(key)
     }
 
-    /// Returns a boolean value with the block that indicates whether a given key is in cache.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
+    /// Returns the value for `key`. Memory is consulted first; a disk hit
+    /// repopulates memory.
+    public func value(forKey key: Key) throws -> Value? {
+        if let v = memoryCache.value(forKey: key) { return v }
+        guard let v = try diskCache.value(forKey: key) else { return nil }
+        memoryCache.set(v, forKey: key)
+        return v
+    }
+
+    /// Stores `value` in both layers.
     ///
     /// - Parameters:
-    ///   - key: A string identifying the value. If empty, just return `false`.
-    ///   - block: A block which will be invoked in background queue when finished.
-    public func containsObject(
-        forKey key: String,
-        block: (@Sendable (_ key: String, _ contains: Bool) -> Void)?
+    ///   - value: Pass `nil` to remove.
+    ///   - key: Key.
+    ///   - cost: Cost for the memory layer.
+    ///   - expiration: Per-entry expiration. Applied to both layers.
+    ///   - extendedData: Extra metadata persisted only by the disk layer.
+    /// - Throws: Transformer / disk write errors bubble up.
+    public func set(
+        _ value: Value?,
+        forKey key: Key,
+        cost: Int = 0,
+        expiration: Expiration? = nil,
+        extendedData: Data? = nil
+    ) throws {
+        guard let value = value else {
+            remove(forKey: key)
+            return
+        }
+        memoryCache.set(value, forKey: key, cost: cost, expiration: expiration)
+        try diskCache.set(value, forKey: key, extendedData: extendedData, expiration: expiration)
+    }
+
+    /// Returns the disk-layer extended data for `key`, or `nil`.
+    public func extendedData(forKey key: Key) -> Data? {
+        diskCache.extendedData(forKey: key)
+    }
+
+    /// Removes `key` from both layers.
+    public func remove(forKey key: Key) {
+        memoryCache.remove(forKey: key)
+        diskCache.remove(forKey: key)
+    }
+
+    /// Empties both layers.
+    public func removeAll() {
+        memoryCache.removeAll()
+        diskCache.removeAll()
+    }
+
+    /// Empties both layers; reports disk-layer progress.
+    public func removeAll(
+        progress: (@Sendable (_ removed: Int32, _ total: Int32) -> Void)?,
+        completion: (@Sendable (_ error: Bool) -> Void)?
     ) {
-        guard let block = block else { return }
+        memoryCache.removeAll()
+        diskCache.removeAll(progress: progress, completion: completion)
+    }
 
-        if memoryCache.containsObject(forKey: key) {
-            DispatchQueue.global(qos: .default).async {
-                block(key, true)
-            }
-        } else {
-            diskCache.containsObject(forKey: key, block: block)
+    // MARK: - Async API
+
+    public func asyncContains(_ key: Key) async -> Bool {
+        if memoryCache.contains(key) { return true }
+        return await diskCache.asyncContains(key)
+    }
+
+    public func asyncValue(forKey key: Key) async throws -> Value? {
+        if let v = memoryCache.value(forKey: key) { return v }
+        guard let v = try await diskCache.asyncValue(forKey: key) else { return nil }
+        await memoryCache.asyncSet(v, forKey: key)
+        return v
+    }
+
+    public func asyncSet(
+        _ value: Value?,
+        forKey key: Key,
+        cost: Int = 0,
+        expiration: Expiration? = nil,
+        extendedData: Data? = nil
+    ) async throws {
+        guard let value = value else {
+            await asyncRemove(forKey: key)
+            return
         }
+        await memoryCache.asyncSet(value, forKey: key, cost: cost, expiration: expiration)
+        try await diskCache.asyncSet(value, forKey: key, extendedData: extendedData, expiration: expiration)
     }
 
-    /// Returns the value associated with a given key.
-    /// This method may blocks the calling thread until file read finished.
-    ///
-    /// - Parameter key: A string identifying the value. If empty, just return nil.
-    /// - Returns: The value associated with key, or nil if no value is associated with key.
-    public func object(forKey key: String) -> NSCoding? {
-        if let box = memoryCache.object(forKey: key) {
-            return box.value
-        }
-        if let object = diskCache.object(forKey: key) {
-            memoryCache.setObject(NSCodingBox(object), forKey: key)
-            return object
-        }
-        return nil
+    public func asyncRemove(forKey key: Key) async {
+        await memoryCache.asyncRemove(forKey: key)
+        await diskCache.asyncRemove(forKey: key)
     }
 
-    /// Returns the value associated with a given key.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameters:
-    ///   - key: A string identifying the value. If empty, just return nil.
-    ///   - block: A block which will be invoked in background queue when finished.
-    public func object(
-        forKey key: String,
-        block: (@Sendable (_ key: String, _ object: NSCoding?) -> Void)?
-    ) {
-        guard let block = block else { return }
-
-        if let box = memoryCache.object(forKey: key) {
-            DispatchQueue.global(qos: .default).async {
-                block(key, box.value)
-            }
-        } else {
-            diskCache.object(forKey: key) { [weak self] key, object in
-                if let self, let object, self.memoryCache.object(forKey: key) == nil {
-                    self.memoryCache.setObject(NSCodingBox(object), forKey: key)
-                }
-                block(key, object)
-            }
-        }
-    }
-
-    /// Sets the value of the specified key in the cache.
-    /// This method may blocks the calling thread until file write finished.
-    ///
-    /// - Parameters:
-    ///   - object: The object to be stored in the cache. If nil, it calls
-    ///     `removeObject(forKey:)`.
-    ///   - key: The key with which to associate the value. If empty, this
-    ///     method has no effect.
-    public func setObject(_ object: NSCoding?, forKey key: String) {
-        if let object = object {
-            memoryCache.setObject(NSCodingBox(object), forKey: key)
-        } else {
-            memoryCache.removeObject(forKey: key)
-        }
-        diskCache.setObject(object, forKey: key)
-    }
-
-    /// Sets the value of the specified key in the cache.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameters:
-    ///   - object: The object to be stored in the cache. If nil, it calls
-    ///     `removeObject(forKey:)`.
-    ///   - key: The key with which to associate the value. If empty, this
-    ///     method has no effect.
-    ///   - block: A block which will be invoked in background queue when finished.
-    public func setObject(
-        _ object: NSCoding?,
-        forKey key: String,
-        block: (@Sendable () -> Void)?
-    ) {
-        if let object = object {
-            memoryCache.setObject(NSCodingBox(object), forKey: key)
-        } else {
-            memoryCache.removeObject(forKey: key)
-        }
-        diskCache.setObject(object, forKey: key, block: block)
-    }
-
-    /// Removes the value of the specified key in the cache.
-    /// This method may blocks the calling thread until file delete finished.
-    ///
-    /// - Parameter key: The key identifying the value to be removed. If empty,
-    ///   this method has no effect.
-    public func removeObject(forKey key: String) {
-        memoryCache.removeObject(forKey: key)
-        diskCache.removeObject(forKey: key)
-    }
-
-    /// Removes the value of the specified key in the cache.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameters:
-    ///   - key: The key identifying the value to be removed. If empty, this
-    ///     method has no effect.
-    ///   - block: A block which will be invoked in background queue when finished.
-    public func removeObject(
-        forKey key: String,
-        block: (@Sendable (_ key: String) -> Void)?
-    ) {
-        memoryCache.removeObject(forKey: key)
-        diskCache.removeObject(forKey: key, block: block)
-    }
-
-    /// Empties the cache.
-    /// This method may blocks the calling thread until file delete finished.
-    public func removeAllObjects() {
-        memoryCache.removeAllObjects()
-        diskCache.removeAllObjects()
-    }
-
-    /// Empties the cache.
-    /// This method returns immediately and invoke the passed block in background queue
-    /// when the operation finished.
-    ///
-    /// - Parameter block: A block which will be invoked in background queue when finished.
-    public func removeAllObjects(block: (@Sendable () -> Void)?) {
-        memoryCache.removeAllObjects()
-        diskCache.removeAllObjects(block: block)
-    }
-
-    /// Empties the cache with block.
-    /// This method returns immediately and executes the clear operation with block in background.
-    ///
-    /// - Parameters:
-    ///   - progress: This block will be invoked during removing, pass nil to ignore.
-    ///   - end: This block will be invoked at the end, pass nil to ignore.
-    /// - Warning: You should not send message to this instance in these blocks.
-    public func removeAllObjects(
-        progress: (@Sendable (_ removedCount: Int32, _ totalCount: Int32) -> Void)?,
-        end: (@Sendable (_ error: Bool) -> Void)?
-    ) {
-        memoryCache.removeAllObjects()
-        diskCache.removeAllObjects(progress: progress, end: end)
+    public func asyncRemoveAll() async {
+        await memoryCache.asyncRemoveAll()
+        await diskCache.asyncRemoveAll()
     }
 }
 
@@ -304,7 +185,7 @@ public final class Cache: @unchecked Sendable {
 
 extension Cache: CustomStringConvertible {
     public var description: String {
-        let ptr = Unmanaged.passUnretained(self).toOpaque()
-        return "<\(type(of: self)): \(ptr)> (\(name))"
+        let id = ObjectIdentifier(self)
+        return "<\(type(of: self)): \(id)> (\(name))"
     }
 }
