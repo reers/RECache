@@ -293,14 +293,14 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     /// Returns the value associated with a given key.
     public func object(forKey key: Key) -> Value? {
         os_unfair_lock_lock(lock)
-        defer { os_unfair_lock_unlock(lock) }
-        
+        var result: Value?
         if let node = linkedList.nodeMap[key] {
             node.time = CACurrentMediaTime()
             linkedList.bringToHead(node)
-            return node.value
+            result = node.value
         }
-        return nil
+        os_unfair_lock_unlock(lock)
+        return result
     }
     
     /// Sets the value of the specified key in the cache, with the specified cost.
