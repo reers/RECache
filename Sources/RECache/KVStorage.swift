@@ -732,6 +732,11 @@ public final class KVStorage {
         var retry = false
         var stmtFinalized = false
 
+        if let cache = dbStmtCache {
+            for (_, stmt) in cache {
+                sqlite3_finalize(stmt)
+            }
+        }
         dbStmtCache = nil
 
         repeat {
