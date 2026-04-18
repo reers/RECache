@@ -353,16 +353,23 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     /// Removes entries whose expiration has passed.
     @available(*, noasync, message: "Use `await` in async contexts.")
     public func removeExpired() {
-        guard case .seconds(let seconds) = expiration else {
-            if case .date(let date) = expiration {
-                lock.wait()
-                if Date() >= date {
-                    kv?.removeAllItems()
-                }
-                lock.signal()
-            }
+        switch expiration {
+        case .never:
             return
+        case .seconds(let seconds):
+            _removeExpiredByAge(seconds)
+        case .days(let days):
+            _removeExpiredByAge(TimeInterval(days) * 86_400)
+        case .date(let date):
+            lock.wait()
+            if Date() >= date {
+                kv?.removeAllItems()
+            }
+            lock.signal()
         }
+    }
+
+    private func _removeExpiredByAge(_ seconds: TimeInterval) {
         let now = TimeInterval(time(nil))
         if now <= seconds { return }
         let cutoff = now - seconds
@@ -578,20 +585,26 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         case .never:
             return
         case .seconds(let seconds):
-            if seconds <= 0 {
-                kv?.removeAllItems()
-                return
-            }
-            let now = TimeInterval(time(nil))
-            if now <= seconds { return }
-            let cutoff = now - seconds
-            if cutoff >= TimeInterval(Int32.max) { return }
-            kv?.removeItemsEarlierThanTime(Int32(cutoff))
+            _removeExpiredByAgeLocked(seconds)
+        case .days(let days):
+            _removeExpiredByAgeLocked(TimeInterval(days) * 86_400)
         case .date(let date):
             if Date() >= date {
                 kv?.removeAllItems()
             }
         }
+    }
+
+    private func _removeExpiredByAgeLocked(_ seconds: TimeInterval) {
+        if seconds <= 0 {
+            kv?.removeAllItems()
+            return
+        }
+        let now = TimeInterval(time(nil))
+        if now <= seconds { return }
+        let cutoff = now - seconds
+        if cutoff >= TimeInterval(Int32.max) { return }
+        kv?.removeItemsEarlierThanTime(Int32(cutoff))
     }
 
     private func _trimToFreeDiskSpace(_ target: UInt64) {

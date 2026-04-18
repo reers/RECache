@@ -36,6 +36,11 @@ public enum Expiration: Sendable, Hashable {
     /// The entry expires `TimeInterval` seconds after its write time.
     case seconds(TimeInterval)
 
+    /// The entry expires `days` days after its write time.
+    ///
+    /// Equivalent to ``seconds(_:)`` with `Double(days) * 86_400`.
+    case days(Int)
+
     /// The entry expires at the given absolute `Date`.
     case date(Date)
 
@@ -46,6 +51,8 @@ public enum Expiration: Sendable, Hashable {
             return nil
         case .seconds(let interval):
             return writeDate.addingTimeInterval(interval)
+        case .days(let days):
+            return writeDate.addingTimeInterval(TimeInterval(days) * 86_400)
         case .date(let date):
             return date
         }

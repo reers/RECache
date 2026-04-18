@@ -189,6 +189,31 @@ struct MemoryCacheTests {
         #expect(cache.totalCount == 0)
     }
 
+    @Test func cacheLevelExpirationDaysPastEvicts() {
+        let cache = MemoryCache<String, Int>()
+        cache.set(1, forKey: "a")
+        cache.expiration = .days(-1)
+        #expect(cache.value(forKey: "a") == nil)
+    }
+
+    @Test func cacheLevelExpirationDaysFutureKeeps() {
+        let cache = MemoryCache<String, Int>()
+        cache.expiration = .days(1)
+        cache.set(1, forKey: "a")
+        #expect(cache.value(forKey: "a") == 1)
+    }
+
+    @Test func removeExpiredDaysSweeps() async throws {
+        let cache = MemoryCache<String, Int>()
+        await cache.set(1, forKey: "a")
+        await cache.set(2, forKey: "b")
+        cache.expiration = .days(-1)
+        await cache.removeExpired()
+        #expect(!(await cache.contains("a")))
+        #expect(!(await cache.contains("b")))
+        #expect(cache.totalCount == 0)
+    }
+
     // MARK: - Async API
 
     @Test func asyncRoundtrip() async {

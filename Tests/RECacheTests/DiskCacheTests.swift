@@ -343,6 +343,24 @@ struct DiskCacheTests {
         #expect(try await cache.value(forKey: "a") == 1)
     }
 
+    @Test func removeExpiredDaysPastWipes() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try await cache.set(1, forKey: "a")
+        cache.expiration = .days(-1)
+        await cache.removeExpired()
+        #expect(cache.totalCount() == 0)
+    }
+
+    @Test func removeExpiredDaysFutureKeeps() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try await cache.set(1, forKey: "a")
+        cache.expiration = .days(1)
+        await cache.removeExpired()
+        #expect(try await cache.value(forKey: "a") == 1)
+    }
+
     // MARK: - Async API
 
     @Test func asyncValueWithExtendedData() async throws {
