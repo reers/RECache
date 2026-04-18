@@ -114,10 +114,17 @@ struct DiskCacheTests {
     @Test func cacheLevelExpirationSeconds() async throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
-        cache.expiration = .seconds(1)
+        // DiskCache stores write time with 1-second precision (`Int32(time(nil))`)
+        // and compares with `Date()`. A 1s expiration with an immediate read
+        // can race the seconds boundary (e.g. modTime=T, Date()=T+0.9 is fine,
+        // but modTime=T, Date()=T+1.1 — which can happen if the test wall
+        // clock ticks between set and get — flags the entry as expired).
+        // Use 3s to leave comfortable slack; spec is about "expired after
+        // interval", not the exact boundary.
+        cache.expiration = .seconds(3)
         try await cache.set(1, forKey: "a")
         #expect(try await cache.value(forKey: "a") == 1)
-        try await Task.sleep(nanoseconds: 1_500_000_000)
+        try await Task.sleep(nanoseconds: 3_500_000_000)
         #expect(try await cache.value(forKey: "a") == nil)
     }
 

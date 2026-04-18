@@ -171,7 +171,12 @@ final class KVStorage {
 
     // MARK: - Private Properties
 
-    private let trashQueue: DispatchQueue
+    // MARK: - Concurrency Migration
+    // Previously: `trashQueue = DispatchQueue(label: "com.reers.cache.disk.trash")`.
+    // Removed entirely; `fileEmptyTrashInBackground()` now uses
+    // `Task.detached(priority: .utility)`. Trash cleanup is low-frequency
+    // (once on init + once per `reset()`), so `Task` allocation cost is
+    // irrelevant, and we get structured cancellation + no stored queue.
 
     private let dbPath: String
     private let dataPath: String
@@ -203,7 +208,6 @@ final class KVStorage {
         self.type = type
         self.dataPath = (path as NSString).appendingPathComponent(kDataDirectoryName)
         self.trashPath = (path as NSString).appendingPathComponent(kTrashDirectoryName)
-        self.trashQueue = DispatchQueue(label: "com.reers.cache.disk.trash")
         self.dbPath = (path as NSString).appendingPathComponent(kDBFileName)
 
         let manager = FileManager.default
@@ -1458,8 +1462,12 @@ final class KVStorage {
     }
 
     private func fileEmptyTrashInBackground() {
+        // MARK: - Concurrency Migration
+        // Previously: `trashQueue.async { ... }` on a dedicated serial queue.
+        // Now: `Task.detached(priority: .utility)`. Behaviourally equivalent
+        // fire-and-forget; `trashPath` is captured by value (String is Sendable).
         let trashPath = self.trashPath
-        trashQueue.async {
+        Task.detached(priority: .utility) {
             let manager = FileManager()
             if let directoryContents = try? manager.contentsOfDirectory(atPath: trashPath) {
                 for path in directoryContents {

@@ -22,6 +22,7 @@
 
 import Foundation
 import CryptoKit
+import os.lock
 #if canImport(UIKit)
 import UIKit
 #elseif canImport(AppKit)
@@ -57,9 +58,9 @@ private func stringMD5(_ string: String) -> String {
 ///
 /// ### Concurrency
 /// `@unchecked Sendable`: all access to the underlying `KVStorage` is
-/// serialized by ``lock`` (a `DispatchSemaphore`). Mutable public properties
-/// follow the YYCache "configure once, use after" convention — concurrent
-/// mutation from multiple threads is not supported.
+/// serialized by ``lock`` (an `os_unfair_lock`, matching `MemoryCache`).
+/// Mutable public properties follow the YYCache "configure once, use after"
+/// convention — concurrent mutation from multiple threads is not supported.
 public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchecked Sendable {
 
     // MARK: - Attribute
@@ -107,13 +108,13 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     /// If `true`, KVStorage prints error logs. Default: `false`.
     public var isLoggingEnabled: Bool {
         get {
-            lock.wait()
-            defer { lock.signal() }
+            os_unfair_lock_lock(lock)
+            defer { os_unfair_lock_unlock(lock) }
             return kv?.errorLogsEnabled ?? false
         }
         set {
-            lock.wait()
-            defer { lock.signal() }
+            os_unfair_lock_lock(lock)
+            defer { os_unfair_lock_unlock(lock) }
             kv?.errorLogsEnabled = newValue
         }
     }
@@ -121,8 +122,46 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     // MARK: - Private state
 
     private var kv: KVStorage?
-    private let lock = DispatchSemaphore(value: 1)
-    private let queue: DispatchQueue
+
+    // MARK: - Concurrency Migration
+    //
+    // Was: `DispatchSemaphore(value: 1)` used as a plain mutex (every
+    // `wait/signal` pair was a lock critical section — no cross-thread
+    // signalling semantics). Replaced with `os_unfair_lock` (the same
+    // primitive `MemoryCache` uses) because:
+    //   1. `os_unfair_lock_lock / _unlock` is the fastest Darwin mutex
+    //      (~15-25 ns uncontested) while being semantically identical to
+    //      a `DispatchSemaphore(value: 1)` used as a mutex.
+    //   2. It unifies the two caches on one lock primitive.
+    //   3. `OSAllocatedUnfairLock` (iOS 16+) and `Synchronization.Mutex`
+    //      (iOS 18+) are not available on the iOS 13+ deployment floor.
+    //
+    // Stored as a heap-allocated `os_unfair_lock_t` so its identity is
+    // stable across any copies / property-wrapper indirection. `deinit`
+    // tears it down.
+    private let lock: os_unfair_lock_t
+
+    // MARK: - Concurrency Migration
+    //
+    // Was: `DispatchQueue(label: "com.reers.cache.disk", attributes: .concurrent)`
+    // used for (a) `withCheckedContinuation + queue.async` bridges in
+    // every `async` wrapper, and (b) the body of `asyncRemoveAll`.
+    //
+    // Now:
+    //   (a) `async` overloads call non-`noasync` internal helpers
+    //       (`_contains`, `_value`, `_set`, …) directly. `os_unfair_lock`
+    //       serialises access to `kv`, so an extra dispatch hop bought
+    //       nothing.
+    //   (b) `asyncRemoveAll` uses `Task.detached(priority: .utility)`.
+    //
+    // The concurrent queue was also misleading: every job `lock.wait()`ed
+    // before touching `kv`, so it was effectively serial. Removing it
+    // makes that explicit.
+
+    /// Handle to the background auto-trim Task. Cancelled in `deinit`.
+    /// Replaces the old recursive `DispatchQueue.asyncAfter` chain.
+    private var trimTask: Task<Void, Never>?
+
     #if canImport(UIKit) || canImport(AppKit)
     private var terminateObserver: (any NSObjectProtocol)?
     #endif
@@ -152,11 +191,12 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         self.path = path
         self.inlineThreshold = inlineThreshold
         self.transformer = transformer
-        self.queue = DispatchQueue(label: "com.reers.cache.disk", attributes: .concurrent)
+        self.lock = .allocate(capacity: 1)
+        self.lock.initialize(to: os_unfair_lock())
 
         kv.errorLogsEnabled = false
 
-        trimRecursively()
+        startAutoTrim()
 
         #if canImport(UIKit)
         terminateObserver = NotificationCenter.default.addObserver(
@@ -183,6 +223,12 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
             NotificationCenter.default.removeObserver(observer)
         }
         #endif
+        // MARK: - Concurrency Migration
+        // Was: recursive asyncAfter chain relied on `[weak self]` nil to
+        // stop. Now we own a Task handle and cancel it deterministically.
+        trimTask?.cancel()
+        lock.deinitialize(count: 1)
+        lock.deallocate()
     }
 
     // MARK: - Sync API
@@ -194,23 +240,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     /// Returns whether a non-expired entry exists for `key`.
     @available(*, noasync, message: "Use `await` in async contexts.")
     public func contains(_ key: Key) -> Bool {
-        if isKeyInvalid(key) { return false }
-        let k = stringKey(for: key)
-        let now = Date()
-
-        lock.wait()
-        let item = kv?.getItemInfo(forKey: k)
-        lock.signal()
-
-        guard let item else { return false }
-        let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
-        if expiration.isExpired(writtenAt: writeDate, now: now) {
-            lock.wait()
-            kv?.removeItem(forKey: k)
-            lock.signal()
-            return false
-        }
-        return true
+        _contains(key)
     }
 
     /// Returns the value for `key`, or `nil` if absent / expired.
@@ -219,59 +249,20 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     ///   but the transformer rejects it.
     @available(*, noasync, message: "Use `await` in async contexts.")
     public func value(forKey key: Key) throws -> Value? {
-        if isKeyInvalid(key) { return nil }
-        let k = stringKey(for: key)
-
-        lock.wait()
-        let item = kv?.getItem(forKey: k)
-        lock.signal()
-
-        guard let item, !item.value.isEmpty else { return nil }
-
-        let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
-        if expiration.isExpired(writtenAt: writeDate, now: Date()) {
-            lock.wait()
-            kv?.removeItem(forKey: k)
-            lock.signal()
-            return nil
-        }
-
-        return try transformer.decode(item.value)
+        try _value(forKey: key)
     }
 
     /// Returns the extended data associated with `key`, without reading
     /// (or decoding) the main value. Cheap — only hits SQLite.
     @available(*, noasync, message: "Use `await` in async contexts.")
     public func extendedData(forKey key: Key) -> Data? {
-        if isKeyInvalid(key) { return nil }
-        let k = stringKey(for: key)
-        lock.wait()
-        defer { lock.signal() }
-        return kv?.getItemInfo(forKey: k)?.extendedData
+        _extendedData(forKey: key)
     }
 
     /// Returns `(value, extendedData)` for `key`, or `nil` if absent / expired.
     @available(*, noasync, message: "Use `await` in async contexts.")
     public func valueWithExtendedData(forKey key: Key) throws -> (value: Value, extendedData: Data?)? {
-        if isKeyInvalid(key) { return nil }
-        let k = stringKey(for: key)
-
-        lock.wait()
-        let item = kv?.getItem(forKey: k)
-        lock.signal()
-
-        guard let item, !item.value.isEmpty else { return nil }
-
-        let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
-        if expiration.isExpired(writtenAt: writeDate, now: Date()) {
-            lock.wait()
-            kv?.removeItem(forKey: k)
-            lock.signal()
-            return nil
-        }
-
-        let value = try transformer.decode(item.value)
-        return (value, item.extendedData)
+        try _valueWithExtendedData(forKey: key)
     }
 
     /// Stores `value` for `key`.
@@ -290,9 +281,231 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         forKey key: Key,
         extendedData: Data? = nil
     ) throws {
+        try _set(value, forKey: key, extendedData: extendedData)
+    }
+
+    /// Removes the entry for `key`, if any.
+    @available(*, noasync, message: "Use `await` in async contexts.")
+    public func remove(forKey key: Key) {
+        _remove(forKey: key)
+    }
+
+    /// Empties the cache.
+    @available(*, noasync, message: "Use `await` in async contexts.")
+    public func removeAll() {
+        _removeAll()
+    }
+
+    /// Asynchronously empties the cache, reporting progress through callbacks.
+    ///
+    /// Returns immediately; work runs on a background executor and delivers
+    /// callbacks from that executor. Safe to invoke from any context.
+    //
+    // MARK: - Concurrency Migration
+    // Was: `queue.async { [weak self] in lock.wait(); kv.removeAllItems(...); lock.signal() }`.
+    // Now: `Task.detached(priority: .utility) { … }`. Semantics match —
+    // fire-and-forget work on a background executor. The callbacks are
+    // still invoked from that executor, as before.
+    public func asyncRemoveAll(
+        progress: (@Sendable (_ removed: Int32, _ total: Int32) -> Void)?,
+        completion: (@Sendable (_ error: Bool) -> Void)?
+    ) {
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else {
+                completion?(true)
+                return
+            }
+            // Delegated to a sync helper because `os_unfair_lock_lock` /
+            // `_unlock` are `OS_SWIFT_UNAVAILABLE_FROM_ASYNC`; sitting them
+            // inside a non-async helper keeps the call site itself out of
+            // async context.
+            self._asyncRemoveAllLocked(progress: progress, completion: completion)
+        }
+    }
+
+    private func _asyncRemoveAllLocked(
+        progress: (@Sendable (_ removed: Int32, _ total: Int32) -> Void)?,
+        completion: (@Sendable (_ error: Bool) -> Void)?
+    ) {
+        os_unfair_lock_lock(lock)
+        kv?.removeAllItems(progress: progress, end: completion)
+        os_unfair_lock_unlock(lock)
+    }
+
+    /// Removes entries whose expiration has passed.
+    @available(*, noasync, message: "Use `await` in async contexts.")
+    public func removeExpired() {
+        _removeExpired()
+    }
+
+    // MARK: - Trim
+
+    /// Evicts LRU entries until the total count ≤ `limit`.
+    public func trim(toCount limit: Int) {
+        os_unfair_lock_lock(lock)
+        _trimToCount(limit)
+        os_unfair_lock_unlock(lock)
+    }
+
+    /// Evicts LRU entries until the total cost (bytes) ≤ `limit`.
+    public func trim(toCost limit: Int) {
+        os_unfair_lock_lock(lock)
+        _trimToCost(limit)
+        os_unfair_lock_unlock(lock)
+    }
+
+    // MARK: - Status
+
+    public func totalCount() -> Int {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        return Int(kv?.getItemsCount() ?? 0)
+    }
+
+    public func totalCost() -> Int {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        return Int(kv?.getItemsSize() ?? 0)
+    }
+
+    // MARK: - Async API
+    //
+    // MARK: - Concurrency Migration
+    // Each of these previously went through a
+    // `withCheckedContinuation + queue.async { self?.syncMethod(...) }`
+    // double-hop. Now they call the non-`noasync` internal helpers
+    // (`_contains`, `_value`, …) directly. The sync implementations are
+    // already thread-safe under `os_unfair_lock`, so calling them from any
+    // isolation is safe, and we save one continuation allocation plus one
+    // GCD enqueue per call.
+
+    /// Async overload of ``contains(_:)``.
+    public nonisolated func contains(_ key: Key) async -> Bool {
+        _contains(key)
+    }
+
+    /// Async overload of ``value(forKey:)``.
+    public nonisolated func value(forKey key: Key) async throws -> Value? {
+        try _value(forKey: key)
+    }
+
+    /// Async overload of ``valueWithExtendedData(forKey:)``.
+    public nonisolated func valueWithExtendedData(
+        forKey key: Key
+    ) async throws -> (value: Value, extendedData: Data?)? {
+        try _valueWithExtendedData(forKey: key)
+    }
+
+    /// Async overload of ``extendedData(forKey:)``.
+    public nonisolated func extendedData(forKey key: Key) async -> Data? {
+        _extendedData(forKey: key)
+    }
+
+    /// Async overload of ``set(_:forKey:extendedData:)``.
+    public nonisolated func set(
+        _ value: Value?,
+        forKey key: Key,
+        extendedData: Data? = nil
+    ) async throws {
+        try _set(value, forKey: key, extendedData: extendedData)
+    }
+
+    /// Async overload of ``remove(forKey:)``.
+    public nonisolated func remove(forKey key: Key) async {
+        _remove(forKey: key)
+    }
+
+    /// Async overload of ``removeAll()``.
+    public nonisolated func removeAll() async {
+        _removeAll()
+    }
+
+    /// Async overload of ``removeExpired()``.
+    public nonisolated func removeExpired() async {
+        _removeExpired()
+    }
+
+    // MARK: - Internal helpers (shared by sync + async API)
+
+    internal func _contains(_ key: Key) -> Bool {
+        if isKeyInvalid(key) { return false }
+        let k = stringKey(for: key)
+        let now = Date()
+
+        os_unfair_lock_lock(lock)
+        let item = kv?.getItemInfo(forKey: k)
+        os_unfair_lock_unlock(lock)
+
+        guard let item else { return false }
+        let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
+        if expiration.isExpired(writtenAt: writeDate, now: now) {
+            os_unfair_lock_lock(lock)
+            kv?.removeItem(forKey: k)
+            os_unfair_lock_unlock(lock)
+            return false
+        }
+        return true
+    }
+
+    internal func _value(forKey key: Key) throws -> Value? {
+        if isKeyInvalid(key) { return nil }
+        let k = stringKey(for: key)
+
+        os_unfair_lock_lock(lock)
+        let item = kv?.getItem(forKey: k)
+        os_unfair_lock_unlock(lock)
+
+        guard let item, !item.value.isEmpty else { return nil }
+
+        let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
+        if expiration.isExpired(writtenAt: writeDate, now: Date()) {
+            os_unfair_lock_lock(lock)
+            kv?.removeItem(forKey: k)
+            os_unfair_lock_unlock(lock)
+            return nil
+        }
+
+        return try transformer.decode(item.value)
+    }
+
+    internal func _extendedData(forKey key: Key) -> Data? {
+        if isKeyInvalid(key) { return nil }
+        let k = stringKey(for: key)
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        return kv?.getItemInfo(forKey: k)?.extendedData
+    }
+
+    internal func _valueWithExtendedData(forKey key: Key) throws -> (value: Value, extendedData: Data?)? {
+        if isKeyInvalid(key) { return nil }
+        let k = stringKey(for: key)
+
+        os_unfair_lock_lock(lock)
+        let item = kv?.getItem(forKey: k)
+        os_unfair_lock_unlock(lock)
+
+        guard let item, !item.value.isEmpty else { return nil }
+
+        let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
+        if expiration.isExpired(writtenAt: writeDate, now: Date()) {
+            os_unfair_lock_lock(lock)
+            kv?.removeItem(forKey: k)
+            os_unfair_lock_unlock(lock)
+            return nil
+        }
+
+        let value = try transformer.decode(item.value)
+        return (value, item.extendedData)
+    }
+
+    internal func _set(
+        _ value: Value?,
+        forKey key: Key,
+        extendedData: Data? = nil
+    ) throws {
         if isKeyInvalid(key) { return }
         guard let value = value else {
-            remove(forKey: key)
+            _remove(forKey: key)
             return
         }
 
@@ -306,53 +519,28 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
             }
         }
 
-        lock.wait()
+        os_unfair_lock_lock(lock)
         let ok = kv?.saveItem(withKey: k, value: payload, filename: fname, extendedData: extendedData) ?? false
-        lock.signal()
+        os_unfair_lock_unlock(lock)
 
         if !ok { throw CacheError.writeFailed }
     }
 
-    /// Removes the entry for `key`, if any.
-    @available(*, noasync, message: "Use `await` in async contexts.")
-    public func remove(forKey key: Key) {
+    internal func _remove(forKey key: Key) {
         if isKeyInvalid(key) { return }
         let k = stringKey(for: key)
-        lock.wait()
+        os_unfair_lock_lock(lock)
         kv?.removeItem(forKey: k)
-        lock.signal()
+        os_unfair_lock_unlock(lock)
     }
 
-    /// Empties the cache.
-    @available(*, noasync, message: "Use `await` in async contexts.")
-    public func removeAll() {
-        lock.wait()
+    internal func _removeAll() {
+        os_unfair_lock_lock(lock)
         kv?.removeAllItems()
-        lock.signal()
+        os_unfair_lock_unlock(lock)
     }
 
-    /// Asynchronously empties the cache, reporting progress through callbacks.
-    ///
-    /// Returns immediately; work runs on an internal background queue and
-    /// delivers callbacks from that queue. Safe to invoke from any context.
-    public func asyncRemoveAll(
-        progress: (@Sendable (_ removed: Int32, _ total: Int32) -> Void)?,
-        completion: (@Sendable (_ error: Bool) -> Void)?
-    ) {
-        queue.async { [weak self] in
-            guard let self else {
-                completion?(true)
-                return
-            }
-            lock.wait()
-            kv?.removeAllItems(progress: progress, end: completion)
-            lock.signal()
-        }
-    }
-
-    /// Removes entries whose expiration has passed.
-    @available(*, noasync, message: "Use `await` in async contexts.")
-    public func removeExpired() {
+    internal func _removeExpired() {
         switch expiration {
         case .never:
             return
@@ -361,11 +549,11 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         case .days(let days):
             _removeExpiredByAge(TimeInterval(days) * 86_400)
         case .date(let date):
-            lock.wait()
+            os_unfair_lock_lock(lock)
             if Date() >= date {
                 kv?.removeAllItems()
             }
-            lock.signal()
+            os_unfair_lock_unlock(lock)
         }
     }
 
@@ -374,150 +562,9 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         if now <= seconds { return }
         let cutoff = now - seconds
         if cutoff >= TimeInterval(Int32.max) { return }
-        lock.wait()
+        os_unfair_lock_lock(lock)
         kv?.removeItemsEarlierThanTime(Int32(cutoff))
-        lock.signal()
-    }
-
-    // MARK: - Trim
-
-    /// Evicts LRU entries until the total count ≤ `limit`.
-    public func trim(toCount limit: Int) {
-        lock.wait()
-        _trimToCount(limit)
-        lock.signal()
-    }
-
-    /// Evicts LRU entries until the total cost (bytes) ≤ `limit`.
-    public func trim(toCost limit: Int) {
-        lock.wait()
-        _trimToCost(limit)
-        lock.signal()
-    }
-
-    // MARK: - Status
-
-    public func totalCount() -> Int {
-        lock.wait()
-        defer { lock.signal() }
-        return Int(kv?.getItemsCount() ?? 0)
-    }
-
-    public func totalCost() -> Int {
-        lock.wait()
-        defer { lock.signal() }
-        return Int(kv?.getItemsSize() ?? 0)
-    }
-
-    // MARK: - Async API
-
-    /// Async overload of ``contains(_:)``.
-    public func contains(_ key: Key) async -> Bool {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            queue.async { [weak self] in
-                continuation.resume(returning: self?.contains(key) ?? false)
-            }
-        }
-    }
-
-    /// Async overload of ``value(forKey:)``.
-    public func value(forKey key: Key) async throws -> Value? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Value?, any Error>) in
-            queue.async { [weak self] in
-                guard let self else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                do {
-                    let result = try value(forKey: key)
-                    continuation.resume(returning: result)
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
-    }
-
-    /// Async overload of ``valueWithExtendedData(forKey:)``.
-    public func valueWithExtendedData(
-        forKey key: Key
-    ) async throws -> (value: Value, extendedData: Data?)? {
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<(value: Value, extendedData: Data?)?, any Error>) in
-            queue.async { [weak self] in
-                guard let self else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                do {
-                    let result = try valueWithExtendedData(forKey: key)
-                    continuation.resume(returning: result)
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
-    }
-
-    /// Async overload of ``extendedData(forKey:)``.
-    public func extendedData(forKey key: Key) async -> Data? {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Data?, Never>) in
-            queue.async { [weak self] in
-                continuation.resume(returning: self?.extendedData(forKey: key))
-            }
-        }
-    }
-
-    /// Async overload of ``set(_:forKey:extendedData:)``.
-    public func set(
-        _ value: Value?,
-        forKey key: Key,
-        extendedData: Data? = nil
-    ) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-            queue.async { [weak self] in
-                guard let self else {
-                    continuation.resume(throwing: CacheError.storageUnavailable)
-                    return
-                }
-                do {
-                    try set(value, forKey: key, extendedData: extendedData)
-                    continuation.resume()
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
-    }
-
-    /// Async overload of ``remove(forKey:)``.
-    public func remove(forKey key: Key) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            queue.async { [weak self] in
-                self?.remove(forKey: key)
-                continuation.resume()
-            }
-        }
-    }
-
-    /// Async overload of ``removeAll()``.
-    public func removeAll() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            queue.async { [weak self] in
-                self?.removeAll()
-                continuation.resume()
-            }
-        }
-    }
-
-    /// Async overload of ``removeExpired()``.
-    public func removeExpired() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            queue.async { [weak self] in
-                self?.removeExpired()
-                continuation.resume()
-            }
-        }
+        os_unfair_lock_unlock(lock)
     }
 
     // MARK: - Private
@@ -543,44 +590,46 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     }
 
     private func appWillBeTerminated() {
-        lock.wait()
+        os_unfair_lock_lock(lock)
         kv = nil
-        lock.signal()
+        os_unfair_lock_unlock(lock)
     }
 
-    private func trimRecursively() {
-        DispatchQueue
-            .global(qos: .utility)
-            .asyncAfter(deadline: .now() + autoTrimInterval) { [weak self] in
-                guard let self else { return }
-                trimInBackground()
-                trimRecursively()
+    // MARK: - Concurrency Migration
+    //
+    // Was: `DispatchQueue.global(qos:.utility).asyncAfter(deadline: …) { [weak self] in trimInBackground(); trimRecursively() }`.
+    // Now: a single `Task.detached(priority:.utility)` sleeps between
+    // iterations. `trimTask` holds the handle so `deinit` can cancel
+    // the loop without having to rely on weak-self nil'ing to stop the
+    // next rescheduled block.
+    private func startAutoTrim() {
+        trimTask = Task.detached(priority: .utility) { [weak self] in
+            while !Task.isCancelled {
+                guard let interval = self?.autoTrimInterval else { return }
+                let nanos = UInt64(max(0, interval) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanos)
+                if Task.isCancelled { return }
+                self?.trimInBackground()
             }
-    }
-
-    private func trimInBackground() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            lock.wait()
-            _trimToCost(costLimit)
-            _trimToCount(countLimit)
-            _removeExpired()
-            _trimToFreeDiskSpace(freeDiskSpaceLimit)
-            lock.signal()
         }
     }
 
-    private func _trimToCost(_ limit: Int) {
-        if limit >= Int(Int32.max) { return }
-        kv?.removeItemsToFitSize(Int32(limit))
+    private func trimInBackground() {
+        // Single critical section covering cost / count / age / freespace
+        // trims, matching the original semantics (was previously one
+        // `lock.wait() … lock.signal()` block inside `queue.async`).
+        os_unfair_lock_lock(lock)
+        _trimToCost(costLimit)
+        _trimToCount(countLimit)
+        _removeExpired_locked()
+        _trimToFreeDiskSpace(freeDiskSpaceLimit)
+        os_unfair_lock_unlock(lock)
     }
 
-    private func _trimToCount(_ limit: Int) {
-        if limit >= Int(Int32.max) { return }
-        kv?.removeItemsToFitCount(Int32(limit))
-    }
-
-    private func _removeExpired() {
+    /// Lock-held variant of `_removeExpired()`: `trimInBackground` already
+    /// holds `lock`, so we mustn't take it again (`os_unfair_lock` is not
+    /// reentrant — the second `_lock` would deadlock the thread).
+    private func _removeExpired_locked() {
         switch expiration {
         case .never:
             return
@@ -593,6 +642,16 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
                 kv?.removeAllItems()
             }
         }
+    }
+
+    private func _trimToCost(_ limit: Int) {
+        if limit >= Int(Int32.max) { return }
+        kv?.removeItemsToFitSize(Int32(limit))
+    }
+
+    private func _trimToCount(_ limit: Int) {
+        if limit >= Int(Int32.max) { return }
+        kv?.removeItemsToFitCount(Int32(limit))
     }
 
     private func _removeExpiredByAgeLocked(_ seconds: TimeInterval) {

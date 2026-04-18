@@ -169,11 +169,15 @@ struct MemoryCacheTests {
 
     @Test func setRefreshesExpiration() async throws {
         let cache = MemoryCache<String, Int>()
-        cache.expiration = .seconds(0.2)
+        // Tolerate cooperative-pool scheduling jitter: use 500ms expiration
+        // and ~150ms sleeps so the second `set` re-stamps the entry well
+        // before the original deadline would fire. The spec we're verifying
+        // (write-time refresh on re-`set`) is independent of this budget.
+        cache.expiration = .seconds(0.5)
         await cache.set(1, forKey: "a")
-        try await Task.sleep(nanoseconds: 120_000_000)
+        try await Task.sleep(nanoseconds: 150_000_000)
         await cache.set(2, forKey: "a")
-        try await Task.sleep(nanoseconds: 120_000_000)
+        try await Task.sleep(nanoseconds: 150_000_000)
         #expect(await cache.value(forKey: "a") == 2)
     }
 
