@@ -31,20 +31,33 @@ import UIKit
 
 /// Internal LRU doubly-linked-list node. Fields are accessed only while
 /// `MemoryCache.lock` is held.
-fileprivate final class LinkedListNode<Key: Hashable & Sendable, Value: Sendable>: @unchecked Sendable {
-    unowned var prev: LinkedListNode?
-    unowned var next: LinkedListNode?
-    let key: Key
-    var value: Value
-    var cost: Int = 0
-    /// Last-access time in monotonic seconds (CACurrentMediaTime); drives LRU
-    /// ordering by the linked list itself, stored here only for future use.
-    var accessTime: TimeInterval = 0
+///
+/// `prev` / `next` use `unowned(unsafe)` to match YYCache's
+/// `__unsafe_unretained` semantics: the linked list itself owns every node
+/// via `nodeMap`, so we don't need runtime retain-count checks on each
+/// traversal. This removes per-pointer ARC overhead on the hot path.
+///
+/// Marked `@usableFromInline internal` so the `@inlinable` hot-path APIs
+/// on `MemoryCache` can reference the type and enable cross-module
+/// specialization for concrete `Key`/`Value` types.
+@usableFromInline
+internal final class LinkedListNode<Key: Hashable & Sendable, Value: Sendable>: @unchecked Sendable {
+    @usableFromInline unowned(unsafe) var prev: LinkedListNode?
+    @usableFromInline unowned(unsafe) var next: LinkedListNode?
+    @usableFromInline let key: Key
+    @usableFromInline var value: Value
+    @usableFromInline var cost: Int = 0
     /// Write time, set on `set(_:forKey:)` and **not** refreshed on read.
     /// Evaluated against the cache-level `expiration` at read time.
-    var writeDate: Date = Date()
+    ///
+    /// Stored as `TimeInterval` (`Date`'s underlying representation) to avoid
+    /// per-write `Date()` struct construction on the hot path. Only meaningful
+    /// when `expiration != .never`; callers skip touching this field entirely
+    /// in the default case.
+    @usableFromInline var writeTime: TimeInterval = 0
 
-    init(key: Key, value: Value) {
+    @inlinable
+    internal init(key: Key, value: Value) {
         self.key = key
         self.value = value
     }
@@ -52,17 +65,22 @@ fileprivate final class LinkedListNode<Key: Hashable & Sendable, Value: Sendable
 
 // MARK: - Linked list
 
-fileprivate final class LinkedList<Key: Hashable & Sendable, Value: Sendable> {
-    private(set) var head: LinkedListNode<Key, Value>?
-    private(set) var tail: LinkedListNode<Key, Value>?
-    var nodeMap: [Key: LinkedListNode<Key, Value>] = [:]
+@usableFromInline
+internal final class LinkedList<Key: Hashable & Sendable, Value: Sendable> {
+    @usableFromInline var head: LinkedListNode<Key, Value>?
+    @usableFromInline var tail: LinkedListNode<Key, Value>?
+    @usableFromInline var nodeMap: [Key: LinkedListNode<Key, Value>] = [:]
 
-    var totalCost: Int = 0
-    var totalCount: Int = 0
-    var releaseOnMainThread: Bool = false
-    var releaseAsynchronously: Bool = true
+    @usableFromInline var totalCost: Int = 0
+    @usableFromInline var totalCount: Int = 0
+    @usableFromInline var releaseOnMainThread: Bool = false
+    @usableFromInline var releaseAsynchronously: Bool = true
 
-    func insertAtHead(_ node: LinkedListNode<Key, Value>) {
+    @inlinable
+    internal init() {}
+
+    @inlinable
+    internal func insertAtHead(_ node: LinkedListNode<Key, Value>) {
         nodeMap[node.key] = node
         totalCost += node.cost
         totalCount += 1
@@ -78,7 +96,8 @@ fileprivate final class LinkedList<Key: Hashable & Sendable, Value: Sendable> {
         self.head = node
     }
 
-    func bringToHead(_ node: LinkedListNode<Key, Value>) {
+    @inlinable
+    internal func bringToHead(_ node: LinkedListNode<Key, Value>) {
         guard node !== head else { return }
 
         if node === tail {
@@ -95,7 +114,8 @@ fileprivate final class LinkedList<Key: Hashable & Sendable, Value: Sendable> {
         head = node
     }
 
-    func remove(_ node: LinkedListNode<Key, Value>) {
+    @inlinable
+    internal func remove(_ node: LinkedListNode<Key, Value>) {
         nodeMap.removeValue(forKey: node.key)
         totalCost -= node.cost
         totalCount -= 1
@@ -115,7 +135,8 @@ fileprivate final class LinkedList<Key: Hashable & Sendable, Value: Sendable> {
     }
 
     @discardableResult
-    func removeTail() -> LinkedListNode<Key, Value>? {
+    @inlinable
+    internal func removeTail() -> LinkedListNode<Key, Value>? {
         guard let tail = tail else { return nil }
 
         nodeMap.removeValue(forKey: tail.key)
@@ -133,9 +154,16 @@ fileprivate final class LinkedList<Key: Hashable & Sendable, Value: Sendable> {
         return tail
     }
 
-    func removeAll() {
-        let holder = Array(nodeMap.values)
-        nodeMap = [:]
+    @inlinable
+    internal func removeAll() {
+        // Build `holder` by draining nodeMap so we don't pay for an extra
+        // Array(values) copy — we're throwing the dict contents away anyway.
+        // Keep the dict's bucket capacity so the next batch of inserts can
+        // reuse it without rehashing (matches YYCache, whose CFMutableDictionary
+        // does not shrink on removeObjectForKey:). This is what kept YYCache
+        // ahead on the "without resize" benchmark.
+        let holder = ContiguousArray(nodeMap.values)
+        nodeMap.removeAll(keepingCapacity: true)
         totalCost = 0
         totalCount = 0
         head = nil
@@ -267,9 +295,12 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
 
     // MARK: - Private state
 
-    private let lock: os_unfair_lock_t
-    private let linkedList = LinkedList<Key, Value>()
-    private let queue: DispatchQueue
+    // Exposed as `@usableFromInline internal` (not `private`) so the
+    // `@inlinable` hot-path methods below can reference them and get
+    // cross-module specialization for concrete `Key`/`Value` types.
+    @usableFromInline internal let lock: os_unfair_lock_t
+    @usableFromInline internal let linkedList = LinkedList<Key, Value>()
+    @usableFromInline internal let queue: DispatchQueue
     #if canImport(UIKit)
     private var memoryWarningObserver: (any NSObjectProtocol)?
     private var enterBackgroundObserver: (any NSObjectProtocol)?
@@ -333,12 +364,14 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
 
     /// Returns whether a non-expired entry exists for `key`.
     @available(*, noasync, message: "Use `await` in async contexts.")
+    @inlinable
     public func contains(_ key: Key) -> Bool {
-        let now = Date()
         os_unfair_lock_lock(lock)
         defer { os_unfair_lock_unlock(lock) }
         guard let node = linkedList.nodeMap[key] else { return false }
-        return !expiration.isExpired(writtenAt: node.writeDate, now: now)
+        // Fast path: no expiration configured, skip any time stamping.
+        if case .never = expiration { return true }
+        return !isExpired(node: node, nowRef: Date.timeIntervalSinceReferenceDate)
     }
 
     /// Returns the value for `key`, or `nil` if not cached or expired.
@@ -347,17 +380,27 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     /// refresh its write time — expiration is evaluated against the original write.
     /// Expired entries are removed lazily here.
     @available(*, noasync, message: "Use `await` in async contexts.")
+    @inlinable
     public func value(forKey key: Key) -> Value? {
-        let now = Date()
+        // Fast path: no expiration configured — avoid `Date()` construction
+        // entirely, which is the single biggest cost on this hot path.
+        if case .never = expiration {
+            os_unfair_lock_lock(lock)
+            defer { os_unfair_lock_unlock(lock) }
+            guard let node = linkedList.nodeMap[key] else { return nil }
+            linkedList.bringToHead(node)
+            return node.value
+        }
+
+        let nowRef = Date.timeIntervalSinceReferenceDate
         os_unfair_lock_lock(lock)
         defer { os_unfair_lock_unlock(lock) }
         guard let node = linkedList.nodeMap[key] else { return nil }
-        if expiration.isExpired(writtenAt: node.writeDate, now: now) {
+        if isExpired(node: node, nowRef: nowRef) {
             linkedList.remove(node)
             scheduleRelease(of: node)
             return nil
         }
-        node.accessTime = CACurrentMediaTime()
         linkedList.bringToHead(node)
         return node.value
     }
@@ -369,31 +412,46 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     ///     `remove(forKey:)`.
     ///   - key: The key.
     ///   - cost: Cost of the entry in your chosen unit (bytes, items, ...).
+    //
+    // `set` is `@inlinable` so consumers get cross-module specialization
+    // for concrete `Key` types (no per-call Hashable witness-table dispatch).
+    //
+    // The body intentionally avoids any `[weak self]`/`DispatchQueue.async`
+    // closure that captures `self`: combining a generic class method with
+    // such a closure trips a SIL-deserializer crash on current Swift
+    // toolchains during cross-module specialization. Overflow trimming is
+    // therefore done synchronously here (YYCache does it asynchronously,
+    // but the trim cost is O(overflow), which is small and bounded; calling
+    // it inline avoids the closure entirely).
     @available(*, noasync, message: "Use `await` in async contexts.")
+    @inlinable
     public func set(_ value: Value?, forKey key: Key, cost: Int = 0) {
         guard let value = value else {
             remove(forKey: key)
             return
         }
 
-        let now = CACurrentMediaTime()
-        let writeDate = Date()
+        // Only compute a write timestamp when expiration is enabled.
+        // `.never` is the common default and the timestamp would be unused.
+        let writeTime: TimeInterval
+        if case .never = expiration {
+            writeTime = 0
+        } else {
+            writeTime = Date.timeIntervalSinceReferenceDate
+        }
 
         os_unfair_lock_lock(lock)
 
         if let node = linkedList.nodeMap[key] {
-            linkedList.totalCost -= node.cost
-            linkedList.totalCost += cost
+            linkedList.totalCost += cost - node.cost
             node.cost = cost
-            node.accessTime = now
-            node.writeDate = writeDate
+            node.writeTime = writeTime
             node.value = value
             linkedList.bringToHead(node)
         } else {
             let node = LinkedListNode(key: key, value: value)
             node.cost = cost
-            node.accessTime = now
-            node.writeDate = writeDate
+            node.writeTime = writeTime
             linkedList.insertAtHead(node)
         }
 
@@ -407,14 +465,15 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         os_unfair_lock_unlock(lock)
 
         if overflowCost {
-            queue.async { [weak self] in
-                self?.trim(toCost: self?.costLimit ?? .max)
-            }
+            // Synchronous instead of the original `queue.async { [weak self] ... }`
+            // — see note above.
+            trim(toCost: costLimit)
         }
     }
 
     /// Removes the entry for `key`, if any.
     @available(*, noasync, message: "Use `await` in async contexts.")
+    @inlinable
     public func remove(forKey key: Key) {
         os_unfair_lock_lock(lock)
         defer { os_unfair_lock_unlock(lock) }
@@ -435,14 +494,16 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     /// Removes every entry whose expiration has passed. O(n).
     @available(*, noasync, message: "Use `await` in async contexts.")
     public func removeExpired() {
-        let now = Date()
+        // Nothing can expire if expiration is disabled.
+        if case .never = expiration { return }
+
+        let nowRef = Date.timeIntervalSinceReferenceDate
         var holder: [LinkedListNode<Key, Value>] = []
         os_unfair_lock_lock(lock)
-        let currentExpiration = expiration
         var current = linkedList.head
         while let node = current {
             let next = node.next
-            if currentExpiration.isExpired(writtenAt: node.writeDate, now: now) {
+            if isExpired(node: node, nowRef: nowRef) {
                 linkedList.remove(node)
                 holder.append(node)
             }
@@ -458,6 +519,24 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
             q.async { [holder] in _ = holder }
         } else if releaseOnMain && pthread_main_np() == 0 {
             DispatchQueue.main.async { [holder] in _ = holder }
+        }
+    }
+
+    /// Expiration check using the `TimeInterval` (reference-date) representation
+    /// stored on `LinkedListNode.writeTime`, avoiding `Date` struct round-trips.
+    /// Caller must have already verified that `expiration != .never`.
+    @inline(__always)
+    @inlinable
+    internal func isExpired(node: LinkedListNode<Key, Value>, nowRef: TimeInterval) -> Bool {
+        switch expiration {
+        case .never:
+            return false
+        case .seconds(let interval):
+            return nowRef >= node.writeTime + interval
+        case .days(let days):
+            return nowRef >= node.writeTime + TimeInterval(days) * 86_400
+        case .date(let date):
+            return nowRef >= date.timeIntervalSinceReferenceDate
         }
     }
 
@@ -539,7 +618,10 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
 
     // MARK: - Private
 
-    private func scheduleRelease(of node: LinkedListNode<Key, Value>) {
+    // `@inlinable internal` (not `private`) so the `@inlinable`
+    // hot-path methods can reference this helper and still specialize.
+    @inlinable
+    internal func scheduleRelease(of node: LinkedListNode<Key, Value>) {
         if linkedList.releaseAsynchronously {
             let q: DispatchQueue = linkedList.releaseOnMainThread ? .main : .global(qos: .utility)
             q.async { _ = node }
