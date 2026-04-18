@@ -557,7 +557,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
             lock.wait()
             _trimToCost(costLimit)
             _trimToCount(countLimit)
-            _trimToExpiration()
+            _removeExpired()
             _trimToFreeDiskSpace(freeDiskSpaceLimit)
             lock.signal()
         }
@@ -573,7 +573,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         kv?.removeItemsToFitCount(Int32(limit))
     }
 
-    private func _trimToExpiration() {
+    private func _removeExpired() {
         switch expiration {
         case .never:
             return
