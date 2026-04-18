@@ -210,18 +210,30 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
 
     /// If `true`, the cache flushes on `UIApplication.didReceiveMemoryWarning`.
     /// Default: `true`.
+    ///
+    /// - Note: Only active on platforms that import UIKit (iOS, tvOS, visionOS,
+    ///   Mac Catalyst). macOS does not deliver UIKit-style memory warnings, so
+    ///   this flag has no effect there.
     public var flushOnMemoryWarning: Bool = true
 
     /// If `true`, the cache flushes on `UIApplication.didEnterBackground`.
     /// Default: `true`.
+    ///
+    /// - Note: Only active on platforms that import UIKit (iOS, tvOS, visionOS,
+    ///   Mac Catalyst). macOS apps do not have an equivalent lifecycle event,
+    ///   so this flag has no effect there.
     public var flushOnBackground: Bool = true
 
     /// Invoked when the app receives a memory warning, before any automatic
     /// flush. Default: `nil`.
+    ///
+    /// - Note: UIKit-only (see ``flushOnMemoryWarning``).
     public var didReceiveMemoryWarningBlock: (@Sendable (MemoryCache) -> Void)?
 
     /// Invoked when the app enters background, before any automatic flush.
     /// Default: `nil`.
+    ///
+    /// - Note: UIKit-only (see ``flushOnBackground``).
     public var didEnterBackgroundBlock: (@Sendable (MemoryCache) -> Void)?
 
     /// Whether evicted entries are released on the main thread. Default: `false`.

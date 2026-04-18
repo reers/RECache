@@ -24,6 +24,8 @@ import Foundation
 import CryptoKit
 #if canImport(UIKit)
 import UIKit
+#elseif canImport(AppKit)
+import AppKit
 #endif
 
 // MARK: - Free disk space helper
@@ -121,7 +123,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     private var kv: KVStorage?
     private let lock = DispatchSemaphore(value: 1)
     private let queue: DispatchQueue
-    #if canImport(UIKit) && !os(watchOS)
+    #if canImport(UIKit) || canImport(AppKit)
     private var terminateObserver: (any NSObjectProtocol)?
     #endif
 
@@ -156,9 +158,17 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
 
         trimRecursively()
 
-        #if canImport(UIKit) && !os(watchOS)
+        #if canImport(UIKit)
         terminateObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.willTerminateNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.appWillBeTerminated()
+        }
+        #elseif canImport(AppKit)
+        terminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
             object: nil,
             queue: nil
         ) { [weak self] _ in
@@ -168,7 +178,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     }
 
     deinit {
-        #if canImport(UIKit) && !os(watchOS)
+        #if canImport(UIKit) || canImport(AppKit)
         if let observer = terminateObserver {
             NotificationCenter.default.removeObserver(observer)
         }

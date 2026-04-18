@@ -115,7 +115,7 @@ private let kTrashDirectoryName = "trash"
 
 // MARK: - Shared Application Helper
 
-#if canImport(UIKit) && !os(watchOS)
+#if canImport(UIKit)
 private let isAppExtension: Bool = {
     guard let cls = NSClassFromString("UIApplication"),
           cls.responds(to: NSSelectorFromString("sharedApplication")) else {
@@ -230,7 +230,7 @@ final class KVStorage {
     }
 
     deinit {
-        #if canImport(UIKit) && !os(watchOS)
+        #if canImport(UIKit)
         let taskID = sharedApplication()?.beginBackgroundTask(expirationHandler: {}) ?? .invalid
         dbClose()
         if taskID != .invalid {
