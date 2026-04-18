@@ -45,81 +45,6 @@ private func stringMD5(_ string: String) -> String {
     return digest.reduce(into: "") { $0 += String(format: "%02x", $1) }
 }
 
-// MARK: - Entry header
-//
-// Every disk blob is prefixed with a fixed 18-byte header carrying the
-// per-entry expiration policy and the high-resolution write date. The header is
-// transparent to `Transformer` — only `Transformer`'s payload is written past
-// the header, and only that payload is passed back to `Transformer.decode`.
-//
-// Layout (host byte order, little-endian on Apple platforms):
-//   byte 0        : format version (0x02)
-//   byte 1        : expiration case  (0 = never, 1 = seconds, 2 = date)
-//   bytes 2..<10  : Float64 expiration payload
-//                   — .seconds → TTL in seconds
-//                   — .date    → absolute `timeIntervalSince1970`
-//                   — .never   → unused
-//   bytes 10..<18 : Float64 write date (`timeIntervalSince1970`)
-//
-// The high-resolution writeDate avoids the sub-second truncation of
-// `KVStorage.modTime` (Int32 Unix seconds) for expiration math.
-
-private enum EntryHeader {
-    static let size = 18
-    static let version: UInt8 = 2
-
-    private static func putDouble(_ value: Double, into data: inout Data, at offset: Int) {
-        var v = value
-        withUnsafeBytes(of: &v) { bytes in
-            for i in 0..<8 { data[offset + i] = bytes[i] }
-        }
-    }
-
-    private static func readDouble(_ data: Data, at offset: Int) -> Double {
-        var value: Double = 0
-        withUnsafeMutableBytes(of: &value) { buf in
-            for i in 0..<8 { buf[i] = data[offset + i] }
-        }
-        return value
-    }
-
-    static func encode(_ expiration: Expiration, writeDate: Date) -> Data {
-        var data = Data(count: size)
-        data[0] = version
-        switch expiration {
-        case .never:
-            data[1] = 0
-        case .seconds(let seconds):
-            data[1] = 1
-            putDouble(seconds, into: &data, at: 2)
-        case .date(let date):
-            data[1] = 2
-            putDouble(date.timeIntervalSince1970, into: &data, at: 2)
-        }
-        putDouble(writeDate.timeIntervalSince1970, into: &data, at: 10)
-        return data
-    }
-
-    /// Returns `(expiration, writeDate, payload)` or `nil` if the blob is not in
-    /// our format.
-    static func decode(_ data: Data) -> (expiration: Expiration, writeDate: Date, payload: Data)? {
-        guard data.count >= size, data[data.startIndex] == version else { return nil }
-        let base = data.startIndex
-        let caseByte = data[base + 1]
-        let expirationValue = readDouble(data, at: base + 2)
-        let writeTime = readDouble(data, at: base + 10)
-        let expiration: Expiration
-        switch caseByte {
-        case 0: expiration = .never
-        case 1: expiration = .seconds(expirationValue)
-        case 2: expiration = .date(Date(timeIntervalSince1970: expirationValue))
-        default: return nil
-        }
-        let payload = data.subdata(in: (base + size)..<data.endIndex)
-        return (expiration, Date(timeIntervalSince1970: writeTime), payload)
-    }
-}
-
 // MARK: - DiskCache
 
 /// `DiskCache` is a thread-safe, generic, LRU cache backed by SQLite + the
@@ -143,7 +68,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     /// The path of the cache directory (read-only).
     public let path: String
 
-    /// Values larger than this (in bytes, **after** encoding + header) are
+    /// Values larger than this (in bytes, after transformer encoding) are
     /// stored as standalone files; smaller values live inline in SQLite.
     ///
     /// `0` → always file; `UInt.max` → always SQLite.
@@ -165,8 +90,9 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     /// Maximum total cost (bytes on disk). Default: `Int.max`. Soft limit.
     public var costLimit: Int = .max
 
-    /// Default expiration policy applied to all entries. Individual entries may
-    /// override via ``set(_:forKey:extendedData:expiration:)``.
+    /// Expiration policy applied to all entries. Evaluated at read time against
+    /// each entry's last write time (second-level precision from
+    /// `KVStorage.modTime`). Default: ``Expiration/never``.
     public var expiration: Expiration = .never
 
     /// The cache will evict until free disk space is at or above this
@@ -262,10 +188,6 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         lock.signal()
 
         guard let item else { return false }
-        // Decode expiration from extendedData? No — from the value header. But
-        // getItemInfo doesn't load inline data, so we can't parse the header
-        // without a full read. Fall back to modTime-based "cache-level expiration"
-        // check for this fast path.
         let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
         if expiration.isExpired(writtenAt: writeDate, now: now) {
             lock.wait()
@@ -290,23 +212,15 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
 
         guard let item, !item.value.isEmpty else { return nil }
 
-        guard let decoded = EntryHeader.decode(item.value) else {
-            // Unknown format — treat as corrupted, remove.
+        let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
+        if expiration.isExpired(writtenAt: writeDate, now: Date()) {
             lock.wait()
             kv?.removeItem(forKey: k)
             lock.signal()
             return nil
         }
 
-        let effectiveExpiration = (decoded.expiration == .never) ? expiration : decoded.expiration
-        if effectiveExpiration.isExpired(writtenAt: decoded.writeDate, now: Date()) {
-            lock.wait()
-            kv?.removeItem(forKey: k)
-            lock.signal()
-            return nil
-        }
-
-        return try transformer.decode(decoded.payload)
+        return try transformer.decode(item.value)
     }
 
     /// Returns the extended data associated with `key`, without reading
@@ -329,20 +243,16 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         lock.signal()
 
         guard let item, !item.value.isEmpty else { return nil }
-        guard let decoded = EntryHeader.decode(item.value) else {
+
+        let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
+        if expiration.isExpired(writtenAt: writeDate, now: Date()) {
             lock.wait()
             kv?.removeItem(forKey: k)
             lock.signal()
             return nil
         }
-        let effectiveExpiration = (decoded.expiration == .never) ? expiration : decoded.expiration
-        if effectiveExpiration.isExpired(writtenAt: decoded.writeDate, now: Date()) {
-            lock.wait()
-            kv?.removeItem(forKey: k)
-            lock.signal()
-            return nil
-        }
-        let value = try transformer.decode(decoded.payload)
+
+        let value = try transformer.decode(item.value)
         return (value, item.extendedData)
     }
 
@@ -354,15 +264,12 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     ///   - extendedData: Optional opaque metadata (e.g. image decoding hints,
     ///     ETag, source URL) stored alongside the value without affecting
     ///     the transformer.
-    ///   - expiration: Per-entry expiration. When `nil` the cache-level ``expiration``
-    ///     applies at read time.
     /// - Throws: ``CacheError/encodingFailed(_:)`` if the transformer rejects
     ///   the value; ``CacheError/writeFailed`` on disk errors.
     public func set(
         _ value: Value?,
         forKey key: Key,
-        extendedData: Data? = nil,
-        expiration: Expiration? = nil
+        extendedData: Data? = nil
     ) throws {
         if isKeyInvalid(key) { return }
         guard let value = value else {
@@ -371,19 +278,17 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         }
 
         let payload: Data = try transformer.encode(value)
-        var blob = EntryHeader.encode(expiration ?? .never, writeDate: Date())
-        blob.append(payload)
 
         let k = stringKey(for: key)
         var fname: String?
         if kv?.type != .sqlite {
-            if UInt(blob.count) > inlineThreshold {
+            if UInt(payload.count) > inlineThreshold {
                 fname = filename(for: key)
             }
         }
 
         lock.wait()
-        let ok = kv?.saveItem(withKey: k, value: blob, filename: fname, extendedData: extendedData) ?? false
+        let ok = kv?.saveItem(withKey: k, value: payload, filename: fname, extendedData: extendedData) ?? false
         lock.signal()
 
         if !ok { throw CacheError.writeFailed }
@@ -421,9 +326,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         }
     }
 
-    /// Removes entries whose cache-level expiration has passed. Per-entry
-    /// expiration is not visible here (would require reading each value blob);
-    /// it is enforced at read time in ``value(forKey:)``.
+    /// Removes entries whose expiration has passed.
     public func removeExpired() {
         guard case .seconds(let seconds) = expiration else {
             if case .date(let date) = expiration {
@@ -532,8 +435,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     public func asyncSet(
         _ value: Value?,
         forKey key: Key,
-        extendedData: Data? = nil,
-        expiration: Expiration? = nil
+        extendedData: Data? = nil
     ) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
             queue.async { [weak self] in
@@ -542,7 +444,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
                     return
                 }
                 do {
-                    try set(value, forKey: key, extendedData: extendedData, expiration: expiration)
+                    try set(value, forKey: key, extendedData: extendedData)
                     continuation.resume()
                 } catch {
                     continuation.resume(throwing: error)

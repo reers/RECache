@@ -17,7 +17,7 @@ RECache 是一个现代化的、泛型化的 **内存 + 磁盘** 两级键值缓
 
 - **完整泛型** — `MemoryCache<Key, Value>` / `DiskCache<Key, Value>` / `Cache<Key, Value>`，`Key: Hashable & Sendable`，`Value: Sendable`
 - **`Transformer<Value>` 序列化** — 内置 `Data`、`Codable`（JSON / 二进制 plist）、`UIImage` / `NSImage` 几种工厂；也可以自定义
-- **per-entry `Expiration`** — `.never`、`.seconds(_:)`、`.date(_:)`；磁盘层精度到毫秒
+- **缓存级 `Expiration`** — `.never`、`.seconds(_:)`、`.date(_:)`，读取时以每条记录的写入时间为基准判定
 - **两级架构** — 内存层是 LRU 双向链表，磁盘层是 SQLite + 文件系统，按条目大小自动选择存储介质
 - **LRU 淘汰** — 按 count、cost、expiration、可用磁盘空间四个维度自动裁剪
 - **智能存储选择** — 小于 `inlineThreshold`（默认 20KB）的值存为 SQLite blob，大值独立落盘
@@ -109,19 +109,19 @@ let lz4: Transformer<MyModel> = Transformer(
 ## ⏳ 过期策略
 
 ```swift
-// 缓存级默认
+// 分层配置 —— 内存和磁盘各自一个过期策略。
 cache.memoryCache.expiration = .seconds(300)
 cache.diskCache.expiration = .seconds(60 * 60 * 24)
 
-// 每条单独覆盖（同时作用在两层）
-try cache.set(article, forKey: 42, expiration: .seconds(30))
-try cache.set(token, forKey: "auth", expiration: .date(expiresAt))
+// 也可以用绝对时间。
+cache.memoryCache.expiration = .date(futureDate)
 
 // 主动清理
 cache.memoryCache.removeExpired()
+cache.diskCache.removeExpired()
 ```
 
-语义：过期判断基于 **写入时间**。读取会把条目移到 LRU 头部，但 **不会** 刷新写入时间。`set` 会刷新。
+语义：过期判断基于每条记录的 **写入时间**。读取会把条目移到 LRU 头部，但 **不会** 刷新写入时间；`set` 会刷新。过期条目等价于 miss，在访问时惰性清除。磁盘层的写入时间精度为秒级。
 
 ---
 
@@ -194,8 +194,8 @@ if let (value, meta) = try cache.diskCache.valueWithExtendedData(forKey: url) {
 │ MemoryCache     │              │ DiskCache           │
 │  <Key, Value>   │              │  <Key, Value>       │
 │ ─────────────── │              │ ─────────────────── │
-│ LRU 双向链表    │              │ 每条 = 18B 头部     │
-│ os_unfair_lock  │              │       + transformer │
+│ LRU 双向链表    │              │ transformer 原始    │
+│ os_unfair_lock  │              │       payload       │
 │ UIKit 内存警告  │              │ DispatchSemaphore   │
 └─────────────────┘              └──────────┬──────────┘
                                             │
@@ -209,7 +209,7 @@ if let (value, meta) = try cache.diskCache.valueWithExtendedData(forKey: url) {
                                    └─────────────────┘
 ```
 
-`KVStorage` 对外 **internal**，业务代码只通过 `DiskCache` / `Cache` 访问它。每个磁盘 blob 前会加 18 字节 `EntryHeader`，保存该条目的过期策略和高精度写入时间 —— `EntryHeader` 对 `Transformer` 完全透明。
+`KVStorage` 对外 **internal**，业务代码只通过 `DiskCache` / `Cache` 访问它。磁盘上的每条记录就是 `Transformer` 的原始输出，没有任何额外的头部或封装；写入时间由 SQLite manifest 的 `modTime`（秒级精度）维护，供缓存级过期判定使用。
 
 ---
 
@@ -242,4 +242,3 @@ RECache 采用 MIT 许可证，部分代码源自同为 MIT 许可证的 YYCache
 ## 🙏 致谢
 
 - [YYCache](https://github.com/ibireme/YYCache)（作者 ibireme）—— 本库 SQLite + 文件系统存储引擎和 LRU 设计的基石
-- [hyperoslo/Cache](https://github.com/hyperoslo/Cache) —— 启发了新版 Swift 原生 API 设计（`Transformer`、`Expiration`、泛型）

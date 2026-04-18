@@ -105,14 +105,14 @@ struct CacheTests {
 
     // MARK: - Expiration
 
-    @Test func perEntryExpirationAppliesToBothLayers() async throws {
+    @Test func cacheLevelExpirationAppliesToBothLayers() async throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         let cache = Cache<String, Profile>(path: dir, transformer: Transformers.codable())!
-        try cache.set(Profile(id: 1, handle: "e"), forKey: "k", expiration: .seconds(0.1))
-        try await Task.sleep(nanoseconds: 200_000_000)
-        // memory miss
+        cache.memoryCache.expiration = .seconds(0.1)
+        cache.diskCache.expiration = .seconds(1)
+        try cache.set(Profile(id: 1, handle: "e"), forKey: "k")
+        try await Task.sleep(nanoseconds: 1_500_000_000)
         #expect(cache.memoryCache.value(forKey: "k") == nil)
-        // disk miss (header-encoded per-entry expiration honored)
         #expect(try cache.diskCache.value(forKey: "k") == nil)
         #expect(try cache.value(forKey: "k") == nil)
     }

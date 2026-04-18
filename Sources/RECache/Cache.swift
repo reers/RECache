@@ -97,22 +97,20 @@ public final class Cache<Key: Hashable & Sendable, Value: Sendable>: @unchecked 
     ///   - value: Pass `nil` to remove.
     ///   - key: Key.
     ///   - cost: Cost for the memory layer.
-    ///   - expiration: Per-entry expiration. Applied to both layers.
     ///   - extendedData: Extra metadata persisted only by the disk layer.
     /// - Throws: Transformer / disk write errors bubble up.
     public func set(
         _ value: Value?,
         forKey key: Key,
         cost: Int = 0,
-        expiration: Expiration? = nil,
         extendedData: Data? = nil
     ) throws {
         guard let value = value else {
             remove(forKey: key)
             return
         }
-        memoryCache.set(value, forKey: key, cost: cost, expiration: expiration)
-        try diskCache.set(value, forKey: key, extendedData: extendedData, expiration: expiration)
+        memoryCache.set(value, forKey: key, cost: cost)
+        try diskCache.set(value, forKey: key, extendedData: extendedData)
     }
 
     /// Returns the disk-layer extended data for `key`, or `nil`.
@@ -159,15 +157,14 @@ public final class Cache<Key: Hashable & Sendable, Value: Sendable>: @unchecked 
         _ value: Value?,
         forKey key: Key,
         cost: Int = 0,
-        expiration: Expiration? = nil,
         extendedData: Data? = nil
     ) async throws {
         guard let value = value else {
             await asyncRemove(forKey: key)
             return
         }
-        await memoryCache.asyncSet(value, forKey: key, cost: cost, expiration: expiration)
-        try await diskCache.asyncSet(value, forKey: key, extendedData: extendedData, expiration: expiration)
+        await memoryCache.asyncSet(value, forKey: key, cost: cost)
+        try await diskCache.asyncSet(value, forKey: key, extendedData: extendedData)
     }
 
     public func asyncRemove(forKey key: Key) async {

@@ -17,7 +17,7 @@ RECache is a modern, generic, **memory + disk** two-tier key-value cache for Swi
 
 - **Full generics** — `MemoryCache<Key, Value>`, `DiskCache<Key, Value>`, `Cache<Key, Value>` with `Key: Hashable & Sendable`, `Value: Sendable`
 - **`Transformer<Value>` serialization** — built-in factories for `Data`, `Codable` (JSON / binary plist), and `UIImage` / `NSImage`; or bring your own
-- **Per-entry `Expiration`** — `.never`, `.seconds(_:)`, `.date(_:)`; resolution down to milliseconds on disk
+- **Cache-level `Expiration`** — `.never`, `.seconds(_:)`, `.date(_:)`, evaluated at read time against each entry's write time
 - **Two-tier architecture** — a lock-free(ish) LRU linked-list memory layer on top of a SQLite + file-system disk layer that automatically picks the best storage medium per value
 - **LRU eviction** — automatic trimming by count, cost, expiration, and free-disk-space
 - **Smart storage selection** — values smaller than `inlineThreshold` (default 20KB) live as SQLite blobs; larger values spill to standalone files
@@ -109,19 +109,19 @@ let lz4: Transformer<MyModel> = Transformer(
 ## ⏳ Expiration
 
 ```swift
-// Cache-level default
+// Configured per layer — memory and disk have independent policies.
 cache.memoryCache.expiration = .seconds(300)
 cache.diskCache.expiration = .seconds(60 * 60 * 24)
 
-// Per-entry override (applied to both layers)
-try cache.set(article, forKey: 42, expiration: .seconds(30))
-try cache.set(token, forKey: "auth", expiration: .date(expiresAt))
+// Or with an absolute deadline.
+cache.memoryCache.expiration = .date(futureDate)
 
 // Manual sweep
 cache.memoryCache.removeExpired()
+cache.diskCache.removeExpired()
 ```
 
-Semantics: expiration is measured from the **write time**. Reading an entry moves it to the head of the LRU list but does **not** refresh the write time. `set` always refreshes.
+Semantics: expiration is measured from each entry's **write time**. Reading an entry moves it to the head of the LRU list but does **not** refresh the write time. `set` always refreshes. Expired entries are treated as misses and removed lazily on access; the disk layer tracks write time at second-level precision.
 
 ---
 
@@ -194,8 +194,8 @@ Reading and writing the same key from multiple concurrent tasks is safe — oper
 │ MemoryCache     │              │ DiskCache           │
 │  <Key, Value>   │              │  <Key, Value>       │
 │ ─────────────── │              │ ─────────────────── │
-│ LRU linked list │              │ entry = 18B header  │
-│ os_unfair_lock  │              │       + transformer │
+│ LRU linked list │              │ raw transformer     │
+│ os_unfair_lock  │              │       payload       │
 │ UIKit warnings  │              │ DispatchSemaphore   │
 └─────────────────┘              └──────────┬──────────┘
                                             │
@@ -209,7 +209,7 @@ Reading and writing the same key from multiple concurrent tasks is safe — oper
                                    └─────────────────┘
 ```
 
-`KVStorage` is kept **internal**; app code talks to it only via `DiskCache` or `Cache`. Every disk blob is prefixed with an 18-byte `EntryHeader` carrying the entry's expiration policy and high-resolution write date — the header is transparent to the `Transformer`.
+`KVStorage` is kept **internal**; app code talks to it only via `DiskCache` or `Cache`. Each disk entry is exactly what the `Transformer` produces — no header, no envelope — and its write time comes from the SQLite manifest's `modTime` (second-level precision) used for cache-level expiration checks.
 
 ---
 
@@ -242,4 +242,3 @@ RECache is released under the MIT license. Portions derive from YYCache, also MI
 ## 🙏 Credits
 
 - [YYCache](https://github.com/ibireme/YYCache) by ibireme — the SQLite + file-system storage engine and the LRU designs this library builds on.
-- [hyperoslo/Cache](https://github.com/hyperoslo/Cache) — inspiration for the modern Swift-native API surface (`Transformer`, `Expiration`, generics).

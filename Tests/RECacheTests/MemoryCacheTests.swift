@@ -124,42 +124,27 @@ struct MemoryCacheTests {
         #expect(cache.value(forKey: "a") == 1)
     }
 
-    @Test func perEntryExpirationSecondsEvicts() async throws {
+    @Test func cacheLevelExpirationSecondsEvicts() async throws {
         let cache = MemoryCache<String, Int>()
-        cache.set(1, forKey: "a", expiration: .seconds(0.1))
+        cache.expiration = .seconds(0.1)
+        cache.set(1, forKey: "a")
         #expect(cache.value(forKey: "a") == 1)
         try await Task.sleep(nanoseconds: 200_000_000)
         #expect(cache.value(forKey: "a") == nil)
         #expect(cache.totalCount == 0)
     }
 
-    @Test func perEntryExpirationDate() async throws {
+    @Test func cacheLevelExpirationDatePast() {
         let cache = MemoryCache<String, Int>()
-        let past = Date(timeIntervalSinceNow: -1)
-        cache.set(1, forKey: "a", expiration: .date(past))
-        #expect(cache.value(forKey: "a") == nil)
-    }
-
-    @Test func cacheLevelExpirationApplies() async throws {
-        let cache = MemoryCache<String, Int>()
-        cache.expiration = .seconds(0.1)
         cache.set(1, forKey: "a")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        cache.expiration = .date(Date(timeIntervalSinceNow: -1))
         #expect(cache.value(forKey: "a") == nil)
-    }
-
-    @Test func perEntryOverridesCacheLevel() {
-        let cache = MemoryCache<String, Int>()
-        cache.expiration = .seconds(0.01)
-        cache.set(1, forKey: "a", expiration: .never)
-        // After cache-level timer, entry should still be present because of .never override.
-        Thread.sleep(forTimeInterval: 0.05)
-        #expect(cache.value(forKey: "a") == 1)
     }
 
     @Test func readDoesNotRefreshExpiration() async throws {
         let cache = MemoryCache<String, Int>()
-        cache.set(1, forKey: "a", expiration: .seconds(0.15))
+        cache.expiration = .seconds(0.15)
+        cache.set(1, forKey: "a")
         try await Task.sleep(nanoseconds: 80_000_000)
         _ = cache.value(forKey: "a") // should NOT refresh write time
         try await Task.sleep(nanoseconds: 90_000_000)
@@ -168,21 +153,24 @@ struct MemoryCacheTests {
 
     @Test func setRefreshesExpiration() async throws {
         let cache = MemoryCache<String, Int>()
-        cache.set(1, forKey: "a", expiration: .seconds(0.2))
+        cache.expiration = .seconds(0.2)
+        cache.set(1, forKey: "a")
         try await Task.sleep(nanoseconds: 120_000_000)
-        cache.set(2, forKey: "a", expiration: .seconds(0.2))
+        cache.set(2, forKey: "a")
         try await Task.sleep(nanoseconds: 120_000_000)
         #expect(cache.value(forKey: "a") == 2)
     }
 
     @Test func removeExpiredSweepsAll() async throws {
         let cache = MemoryCache<String, Int>()
-        cache.set(1, forKey: "a", expiration: .seconds(0.05))
-        cache.set(2, forKey: "b", expiration: .never)
+        cache.expiration = .seconds(0.05)
+        cache.set(1, forKey: "a")
+        cache.set(2, forKey: "b")
         try await Task.sleep(nanoseconds: 100_000_000)
         cache.removeExpired()
         #expect(!cache.contains("a"))
-        #expect(cache.contains("b"))
+        #expect(!cache.contains("b"))
+        #expect(cache.totalCount == 0)
     }
 
     // MARK: - Async API

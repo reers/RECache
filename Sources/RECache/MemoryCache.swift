@@ -41,10 +41,8 @@ fileprivate final class LinkedListNode<Key: Hashable & Sendable, Value: Sendable
     /// ordering by the linked list itself, stored here only for future use.
     var accessTime: TimeInterval = 0
     /// Write time, set on `set(_:forKey:)` and **not** refreshed on read.
-    /// Used together with `expiration` to decide whether the entry has expired.
+    /// Evaluated against the cache-level `expiration` at read time.
     var writeDate: Date = Date()
-    /// Per-entry expiration. Overrides the cache-level default.
-    var expiration: Expiration = .never
 
     init(key: Key, value: Value) {
         self.key = key
@@ -161,7 +159,7 @@ fileprivate final class LinkedList<Key: Hashable & Sendable, Value: Sendable> {
 /// A thread-safe, generic, LRU in-memory cache.
 ///
 /// `MemoryCache` stores values directly (no encoding), bounded by `countLimit`,
-/// `costLimit`, and per-entry `Expiration`. Access is O(1); eviction on overflow is
+/// `costLimit`, and a cache-level `Expiration`. Access is O(1); eviction on overflow is
 /// LRU. Auto-trimming runs every ``autoTrimInterval`` seconds.
 ///
 /// ### Concurrency
@@ -202,8 +200,9 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     /// entries. Default: `Int.max` (no limit). Not a hard limit.
     public var costLimit: Int = .max
 
-    /// Default expiration applied to entries added without a per-entry override.
-    /// Default: `.never`. Replaces YYCache's `ageLimit`.
+    /// Expiration policy applied to all entries. Evaluated at read time against
+    /// each entry's last write time. Default: ``Expiration/never``.
+    /// Replaces YYCache's `ageLimit`.
     public var expiration: Expiration = .never
 
     /// Auto-trim check interval in seconds. Default: `5.0`.
@@ -322,7 +321,7 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         os_unfair_lock_lock(lock)
         defer { os_unfair_lock_unlock(lock) }
         guard let node = linkedList.nodeMap[key] else { return false }
-        return !node.expiration.isExpired(writtenAt: node.writeDate, now: now)
+        return !expiration.isExpired(writtenAt: node.writeDate, now: now)
     }
 
     /// Returns the value for `key`, or `nil` if not cached or expired.
@@ -335,7 +334,7 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         os_unfair_lock_lock(lock)
         defer { os_unfair_lock_unlock(lock) }
         guard let node = linkedList.nodeMap[key] else { return nil }
-        if node.expiration.isExpired(writtenAt: node.writeDate, now: now) {
+        if expiration.isExpired(writtenAt: node.writeDate, now: now) {
             linkedList.remove(node)
             scheduleRelease(of: node)
             return nil
@@ -352,15 +351,12 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     ///     `remove(forKey:)`.
     ///   - key: The key.
     ///   - cost: Cost of the entry in your chosen unit (bytes, items, ...).
-    ///   - expiration: Per-entry expiration; `nil` falls back to ``expiration``
-    ///     (the cache-level default).
-    public func set(_ value: Value?, forKey key: Key, cost: Int = 0, expiration: Expiration? = nil) {
+    public func set(_ value: Value?, forKey key: Key, cost: Int = 0) {
         guard let value = value else {
             remove(forKey: key)
             return
         }
 
-        let effectiveExpiration = expiration ?? self.expiration
         let now = CACurrentMediaTime()
         let writeDate = Date()
 
@@ -372,7 +368,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
             node.cost = cost
             node.accessTime = now
             node.writeDate = writeDate
-            node.expiration = effectiveExpiration
             node.value = value
             linkedList.bringToHead(node)
         } else {
@@ -380,7 +375,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
             node.cost = cost
             node.accessTime = now
             node.writeDate = writeDate
-            node.expiration = effectiveExpiration
             linkedList.insertAtHead(node)
         }
 
@@ -422,10 +416,11 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         let now = Date()
         var holder: [LinkedListNode<Key, Value>] = []
         os_unfair_lock_lock(lock)
+        let currentExpiration = expiration
         var current = linkedList.head
         while let node = current {
             let next = node.next
-            if node.expiration.isExpired(writtenAt: node.writeDate, now: now) {
+            if currentExpiration.isExpired(writtenAt: node.writeDate, now: now) {
                 linkedList.remove(node)
                 holder.append(node)
             }
@@ -462,11 +457,11 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
 
     // MARK: - Async API
 
-    /// Asynchronous variant of ``set(_:forKey:cost:expiration:)``.
-    public func asyncSet(_ value: Value?, forKey key: Key, cost: Int = 0, expiration: Expiration? = nil) async {
+    /// Asynchronous variant of ``set(_:forKey:cost:)``.
+    public func asyncSet(_ value: Value?, forKey key: Key, cost: Int = 0) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async { [weak self] in
-                self?.set(value, forKey: key, cost: cost, expiration: expiration)
+                self?.set(value, forKey: key, cost: cost)
                 continuation.resume()
             }
         }

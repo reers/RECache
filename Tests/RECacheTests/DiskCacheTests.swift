@@ -109,31 +109,33 @@ struct DiskCacheTests {
         #expect(cache.extendedData(forKey: "k") == nil)
     }
 
-    // MARK: - Expiration (per-entry & cache-level)
+    // MARK: - Expiration
 
-    @Test func perEntryExpirationSeconds() async throws {
+    @Test func cacheLevelExpirationSeconds() async throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
-        try cache.set(1, forKey: "a", expiration: .seconds(0.1))
+        cache.expiration = .seconds(1)
+        try cache.set(1, forKey: "a")
         #expect(try cache.value(forKey: "a") == 1)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
         #expect(try cache.value(forKey: "a") == nil)
     }
 
-    @Test func perEntryExpirationDate() throws {
+    @Test func cacheLevelExpirationDatePast() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
-        try cache.set(1, forKey: "a", expiration: .date(Date(timeIntervalSinceNow: -10)))
+        try cache.set(1, forKey: "a")
+        #expect(try cache.value(forKey: "a") == 1)
+        cache.expiration = .date(Date(timeIntervalSinceNow: -10))
         #expect(try cache.value(forKey: "a") == nil)
     }
 
-    @Test func cacheLevelExpirationAppliesWhenEntryIsNever() async throws {
+    @Test func cacheLevelExpirationNeverKeepsEntries() async throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
-        cache.expiration = .seconds(0.1)
-        try cache.set(1, forKey: "a") // per-entry .never → fallback to cache-level
-        try await Task.sleep(nanoseconds: 200_000_000)
-        #expect(try cache.value(forKey: "a") == nil)
+        try cache.set(1, forKey: "a")
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(try cache.value(forKey: "a") == 1)
     }
 
     // MARK: - Large values land in files (mixed type)
