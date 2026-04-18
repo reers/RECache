@@ -64,9 +64,11 @@ let cache = Cache<Int, Article>(
 try cache.set(article, forKey: 42)
 let fetched = try cache.value(forKey: 42)   // memory first, disk fallback
 
-// Async
-try await cache.asyncSet(article, forKey: 42)
-let fetched2 = try await cache.asyncValue(forKey: 42)
+// Async — same names, just add `await`. Sync versions are marked
+// `@available(*, noasync)`, so calling them from an async context
+// warns (or errors under Swift 6 strict concurrency).
+try await cache.set(article, forKey: 42)
+let fetched2 = try await cache.value(forKey: 42)
 
 cache.remove(forKey: 42)
 cache.removeAll()

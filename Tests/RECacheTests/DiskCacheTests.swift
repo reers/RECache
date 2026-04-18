@@ -115,10 +115,10 @@ struct DiskCacheTests {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
         cache.expiration = .seconds(1)
-        try cache.set(1, forKey: "a")
-        #expect(try cache.value(forKey: "a") == 1)
+        try await cache.set(1, forKey: "a")
+        #expect(try await cache.value(forKey: "a") == 1)
         try await Task.sleep(nanoseconds: 1_500_000_000)
-        #expect(try cache.value(forKey: "a") == nil)
+        #expect(try await cache.value(forKey: "a") == nil)
     }
 
     @Test func cacheLevelExpirationDatePast() throws {
@@ -133,9 +133,9 @@ struct DiskCacheTests {
     @Test func cacheLevelExpirationNeverKeepsEntries() async throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
-        try cache.set(1, forKey: "a")
+        try await cache.set(1, forKey: "a")
         try await Task.sleep(nanoseconds: 50_000_000)
-        #expect(try cache.value(forKey: "a") == 1)
+        #expect(try await cache.value(forKey: "a") == 1)
     }
 
     // MARK: - Large values land in files (mixed type)
@@ -159,19 +159,19 @@ struct DiskCacheTests {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         let cache = DiskCache<String, User>(path: dir, transformer: Transformers.codable())!
         let user = User(id: 10, name: "Dan", tags: [])
-        try await cache.asyncSet(user, forKey: "u")
-        #expect(await cache.asyncContains("u"))
-        let fetched = try await cache.asyncValue(forKey: "u")
+        try await cache.set(user, forKey: "u")
+        #expect(await cache.contains("u"))
+        let fetched = try await cache.value(forKey: "u")
         #expect(fetched == user)
-        await cache.asyncRemove(forKey: "u")
-        #expect(!(await cache.asyncContains("u")))
+        await cache.remove(forKey: "u")
+        #expect(!(await cache.contains("u")))
     }
 
     @Test func asyncExtendedData() async throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
-        try await cache.asyncSet(1, forKey: "k", extendedData: Data([9, 9, 9]))
-        let ed = await cache.asyncExtendedData(forKey: "k")
+        try await cache.set(1, forKey: "k", extendedData: Data([9, 9, 9]))
+        let ed = await cache.extendedData(forKey: "k")
         #expect(ed == Data([9, 9, 9]))
     }
 

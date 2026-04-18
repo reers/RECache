@@ -76,14 +76,20 @@ public final class Cache<Key: Hashable & Sendable, Value: Sendable>: @unchecked 
     }
 
     // MARK: - Sync API
+    //
+    // The sync methods below are marked `@available(*, noasync)`: calling them
+    // from an async context triggers a warning (or an error under Swift 6 /
+    // strict concurrency). Use the `async` overloads with `await` instead.
 
     /// Returns whether a non-expired entry exists for `key` in either layer.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func contains(_ key: Key) -> Bool {
         memoryCache.contains(key) || diskCache.contains(key)
     }
 
     /// Returns the value for `key`. Memory is consulted first; a disk hit
     /// repopulates memory.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func value(forKey key: Key) throws -> Value? {
         if let v = memoryCache.value(forKey: key) { return v }
         guard let v = try diskCache.value(forKey: key) else { return nil }
@@ -99,6 +105,7 @@ public final class Cache<Key: Hashable & Sendable, Value: Sendable>: @unchecked 
     ///   - cost: Cost for the memory layer.
     ///   - extendedData: Extra metadata persisted only by the disk layer.
     /// - Throws: Transformer / disk write errors bubble up.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func set(
         _ value: Value?,
         forKey key: Key,
@@ -119,62 +126,73 @@ public final class Cache<Key: Hashable & Sendable, Value: Sendable>: @unchecked 
     }
 
     /// Removes `key` from both layers.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func remove(forKey key: Key) {
         memoryCache.remove(forKey: key)
         diskCache.remove(forKey: key)
     }
 
     /// Empties both layers.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func removeAll() {
         memoryCache.removeAll()
         diskCache.removeAll()
     }
 
-    /// Empties both layers; reports disk-layer progress.
-    public func removeAll(
+    /// Asynchronously empties both layers; reports disk-layer progress through
+    /// callbacks.
+    ///
+    /// Returns immediately; the disk wipe runs on an internal background queue
+    /// and delivers callbacks from that queue. Safe to invoke from any context.
+    public func asyncRemoveAll(
         progress: (@Sendable (_ removed: Int32, _ total: Int32) -> Void)?,
         completion: (@Sendable (_ error: Bool) -> Void)?
     ) {
         memoryCache.removeAll()
-        diskCache.removeAll(progress: progress, completion: completion)
+        diskCache.asyncRemoveAll(progress: progress, completion: completion)
     }
 
     // MARK: - Async API
 
-    public func asyncContains(_ key: Key) async -> Bool {
-        if memoryCache.contains(key) { return true }
-        return await diskCache.asyncContains(key)
+    /// Async overload of ``contains(_:)``.
+    public func contains(_ key: Key) async -> Bool {
+        if await memoryCache.contains(key) { return true }
+        return await diskCache.contains(key)
     }
 
-    public func asyncValue(forKey key: Key) async throws -> Value? {
-        if let v = memoryCache.value(forKey: key) { return v }
-        guard let v = try await diskCache.asyncValue(forKey: key) else { return nil }
-        await memoryCache.asyncSet(v, forKey: key)
+    /// Async overload of ``value(forKey:)``.
+    public func value(forKey key: Key) async throws -> Value? {
+        if let v = await memoryCache.value(forKey: key) { return v }
+        guard let v = try await diskCache.value(forKey: key) else { return nil }
+        await memoryCache.set(v, forKey: key)
         return v
     }
 
-    public func asyncSet(
+    /// Async overload of ``set(_:forKey:cost:extendedData:)``.
+    public func set(
         _ value: Value?,
         forKey key: Key,
         cost: Int = 0,
         extendedData: Data? = nil
     ) async throws {
         guard let value = value else {
-            await asyncRemove(forKey: key)
+            await remove(forKey: key)
             return
         }
-        await memoryCache.asyncSet(value, forKey: key, cost: cost)
-        try await diskCache.asyncSet(value, forKey: key, extendedData: extendedData)
+        await memoryCache.set(value, forKey: key, cost: cost)
+        try await diskCache.set(value, forKey: key, extendedData: extendedData)
     }
 
-    public func asyncRemove(forKey key: Key) async {
-        await memoryCache.asyncRemove(forKey: key)
-        await diskCache.asyncRemove(forKey: key)
+    /// Async overload of ``remove(forKey:)``.
+    public func remove(forKey key: Key) async {
+        await memoryCache.remove(forKey: key)
+        await diskCache.remove(forKey: key)
     }
 
-    public func asyncRemoveAll() async {
-        await memoryCache.asyncRemoveAll()
-        await diskCache.asyncRemoveAll()
+    /// Async overload of ``removeAll()``.
+    public func removeAll() async {
+        await memoryCache.removeAll()
+        await diskCache.removeAll()
     }
 }
 

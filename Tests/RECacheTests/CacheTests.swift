@@ -110,11 +110,11 @@ struct CacheTests {
         let cache = Cache<String, Profile>(path: dir, transformer: Transformers.codable())!
         cache.memoryCache.expiration = .seconds(0.1)
         cache.diskCache.expiration = .seconds(1)
-        try cache.set(Profile(id: 1, handle: "e"), forKey: "k")
+        try await cache.set(Profile(id: 1, handle: "e"), forKey: "k")
         try await Task.sleep(nanoseconds: 1_500_000_000)
-        #expect(cache.memoryCache.value(forKey: "k") == nil)
-        #expect(try cache.diskCache.value(forKey: "k") == nil)
-        #expect(try cache.value(forKey: "k") == nil)
+        #expect(await cache.memoryCache.value(forKey: "k") == nil)
+        #expect(try await cache.diskCache.value(forKey: "k") == nil)
+        #expect(try await cache.value(forKey: "k") == nil)
     }
 
     // MARK: - Async
@@ -123,11 +123,11 @@ struct CacheTests {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         let cache = Cache<String, Profile>(path: dir, transformer: Transformers.codable())!
         let p = Profile(id: 9, handle: "z")
-        try await cache.asyncSet(p, forKey: "k")
-        let fetched = try await cache.asyncValue(forKey: "k")
+        try await cache.set(p, forKey: "k")
+        let fetched = try await cache.value(forKey: "k")
         #expect(fetched == p)
-        await cache.asyncRemove(forKey: "k")
-        #expect(!(await cache.asyncContains("k")))
+        await cache.remove(forKey: "k")
+        #expect(!(await cache.contains("k")))
     }
 
     // MARK: - Int keys

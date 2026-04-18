@@ -176,8 +176,13 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     }
 
     // MARK: - Sync API
+    //
+    // The sync methods below are marked `@available(*, noasync)`: calling them
+    // from an async context triggers a warning (or an error under Swift 6 /
+    // strict concurrency). Use the `async` overloads with `await` instead.
 
     /// Returns whether a non-expired entry exists for `key`.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func contains(_ key: Key) -> Bool {
         if isKeyInvalid(key) { return false }
         let k = stringKey(for: key)
@@ -202,6 +207,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     ///
     /// - Throws: ``CacheError/decodingFailed(_:)`` if the stored blob exists
     ///   but the transformer rejects it.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func value(forKey key: Key) throws -> Value? {
         if isKeyInvalid(key) { return nil }
         let k = stringKey(for: key)
@@ -225,6 +231,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
 
     /// Returns the extended data associated with `key`, without reading
     /// (or decoding) the main value. Cheap — only hits SQLite.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func extendedData(forKey key: Key) -> Data? {
         if isKeyInvalid(key) { return nil }
         let k = stringKey(for: key)
@@ -234,6 +241,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     }
 
     /// Returns `(value, extendedData)` for `key`, or `nil` if absent / expired.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func valueWithExtendedData(forKey key: Key) throws -> (value: Value, extendedData: Data?)? {
         if isKeyInvalid(key) { return nil }
         let k = stringKey(for: key)
@@ -266,6 +274,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     ///     the transformer.
     /// - Throws: ``CacheError/encodingFailed(_:)`` if the transformer rejects
     ///   the value; ``CacheError/writeFailed`` on disk errors.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func set(
         _ value: Value?,
         forKey key: Key,
@@ -295,6 +304,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     }
 
     /// Removes the entry for `key`, if any.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func remove(forKey key: Key) {
         if isKeyInvalid(key) { return }
         let k = stringKey(for: key)
@@ -304,14 +314,18 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     }
 
     /// Empties the cache.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func removeAll() {
         lock.wait()
         kv?.removeAllItems()
         lock.signal()
     }
 
-    /// Empties the cache, reporting progress.
-    public func removeAll(
+    /// Asynchronously empties the cache, reporting progress through callbacks.
+    ///
+    /// Returns immediately; work runs on an internal background queue and
+    /// delivers callbacks from that queue. Safe to invoke from any context.
+    public func asyncRemoveAll(
         progress: (@Sendable (_ removed: Int32, _ total: Int32) -> Void)?,
         completion: (@Sendable (_ error: Bool) -> Void)?
     ) {
@@ -327,6 +341,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     }
 
     /// Removes entries whose expiration has passed.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func removeExpired() {
         guard case .seconds(let seconds) = expiration else {
             if case .date(let date) = expiration {
@@ -379,7 +394,8 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
 
     // MARK: - Async API
 
-    public func asyncContains(_ key: Key) async -> Bool {
+    /// Async overload of ``contains(_:)``.
+    public func contains(_ key: Key) async -> Bool {
         await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             queue.async { [weak self] in
                 continuation.resume(returning: self?.contains(key) ?? false)
@@ -387,7 +403,8 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         }
     }
 
-    public func asyncValue(forKey key: Key) async throws -> Value? {
+    /// Async overload of ``value(forKey:)``.
+    public func value(forKey key: Key) async throws -> Value? {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Value?, any Error>) in
             queue.async { [weak self] in
                 guard let self else {
@@ -404,7 +421,8 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         }
     }
 
-    public func asyncValueWithExtendedData(
+    /// Async overload of ``valueWithExtendedData(forKey:)``.
+    public func valueWithExtendedData(
         forKey key: Key
     ) async throws -> (value: Value, extendedData: Data?)? {
         try await withCheckedThrowingContinuation {
@@ -424,7 +442,8 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         }
     }
 
-    public func asyncExtendedData(forKey key: Key) async -> Data? {
+    /// Async overload of ``extendedData(forKey:)``.
+    public func extendedData(forKey key: Key) async -> Data? {
         await withCheckedContinuation { (continuation: CheckedContinuation<Data?, Never>) in
             queue.async { [weak self] in
                 continuation.resume(returning: self?.extendedData(forKey: key))
@@ -432,7 +451,8 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         }
     }
 
-    public func asyncSet(
+    /// Async overload of ``set(_:forKey:extendedData:)``.
+    public func set(
         _ value: Value?,
         forKey key: Key,
         extendedData: Data? = nil
@@ -453,7 +473,8 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         }
     }
 
-    public func asyncRemove(forKey key: Key) async {
+    /// Async overload of ``remove(forKey:)``.
+    public func remove(forKey key: Key) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async { [weak self] in
                 self?.remove(forKey: key)
@@ -462,7 +483,8 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         }
     }
 
-    public func asyncRemoveAll() async {
+    /// Async overload of ``removeAll()``.
+    public func removeAll() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async { [weak self] in
                 self?.removeAll()
@@ -471,7 +493,8 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         }
     }
 
-    public func asyncRemoveExpired() async {
+    /// Async overload of ``removeExpired()``.
+    public func removeExpired() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async { [weak self] in
                 self?.removeExpired()

@@ -94,8 +94,8 @@ struct MemoryCacheTests {
     @Test func costLimitTrimsEventually() async {
         let cache = MemoryCache<String, Int>()
         cache.costLimit = 50
-        cache.set(1, forKey: "a", cost: 30)
-        cache.set(2, forKey: "b", cost: 30) // overflow fires async trim
+        await cache.set(1, forKey: "a", cost: 30)
+        await cache.set(2, forKey: "b", cost: 30) // overflow fires async trim
         cache.trim(toCost: 50) // force sync
         #expect(cache.totalCost <= 50)
     }
@@ -127,10 +127,10 @@ struct MemoryCacheTests {
     @Test func cacheLevelExpirationSecondsEvicts() async throws {
         let cache = MemoryCache<String, Int>()
         cache.expiration = .seconds(0.1)
-        cache.set(1, forKey: "a")
-        #expect(cache.value(forKey: "a") == 1)
+        await cache.set(1, forKey: "a")
+        #expect(await cache.value(forKey: "a") == 1)
         try await Task.sleep(nanoseconds: 200_000_000)
-        #expect(cache.value(forKey: "a") == nil)
+        #expect(await cache.value(forKey: "a") == nil)
         #expect(cache.totalCount == 0)
     }
 
@@ -144,32 +144,32 @@ struct MemoryCacheTests {
     @Test func readDoesNotRefreshExpiration() async throws {
         let cache = MemoryCache<String, Int>()
         cache.expiration = .seconds(0.15)
-        cache.set(1, forKey: "a")
+        await cache.set(1, forKey: "a")
         try await Task.sleep(nanoseconds: 80_000_000)
-        _ = cache.value(forKey: "a") // should NOT refresh write time
+        _ = await cache.value(forKey: "a") // should NOT refresh write time
         try await Task.sleep(nanoseconds: 90_000_000)
-        #expect(cache.value(forKey: "a") == nil)
+        #expect(await cache.value(forKey: "a") == nil)
     }
 
     @Test func setRefreshesExpiration() async throws {
         let cache = MemoryCache<String, Int>()
         cache.expiration = .seconds(0.2)
-        cache.set(1, forKey: "a")
+        await cache.set(1, forKey: "a")
         try await Task.sleep(nanoseconds: 120_000_000)
-        cache.set(2, forKey: "a")
+        await cache.set(2, forKey: "a")
         try await Task.sleep(nanoseconds: 120_000_000)
-        #expect(cache.value(forKey: "a") == 2)
+        #expect(await cache.value(forKey: "a") == 2)
     }
 
     @Test func removeExpiredSweepsAll() async throws {
         let cache = MemoryCache<String, Int>()
         cache.expiration = .seconds(0.05)
-        cache.set(1, forKey: "a")
-        cache.set(2, forKey: "b")
+        await cache.set(1, forKey: "a")
+        await cache.set(2, forKey: "b")
         try await Task.sleep(nanoseconds: 100_000_000)
-        cache.removeExpired()
-        #expect(!cache.contains("a"))
-        #expect(!cache.contains("b"))
+        await cache.removeExpired()
+        #expect(!(await cache.contains("a")))
+        #expect(!(await cache.contains("b")))
         #expect(cache.totalCount == 0)
     }
 
@@ -177,18 +177,18 @@ struct MemoryCacheTests {
 
     @Test func asyncRoundtrip() async {
         let cache = MemoryCache<String, Int>()
-        await cache.asyncSet(7, forKey: "a")
-        let v = await cache.asyncValue(forKey: "a")
+        await cache.set(7, forKey: "a")
+        let v = await cache.value(forKey: "a")
         #expect(v == 7)
-        #expect(await cache.asyncContains("a"))
-        await cache.asyncRemove(forKey: "a")
-        #expect(!(await cache.asyncContains("a")))
+        #expect(await cache.contains("a"))
+        await cache.remove(forKey: "a")
+        #expect(!(await cache.contains("a")))
     }
 
     @Test func asyncRemoveAll() async {
         let cache = MemoryCache<String, Int>()
-        for i in 0..<10 { cache.set(i, forKey: "k\(i)") }
-        await cache.asyncRemoveAll()
+        for i in 0..<10 { await cache.set(i, forKey: "k\(i)") }
+        await cache.removeAll()
         #expect(cache.totalCount == 0)
     }
 
@@ -220,8 +220,8 @@ struct MemoryCacheTests {
         await withTaskGroup(of: Void.self) { group in
             for i in 0..<100 {
                 group.addTask {
-                    cache.set(i, forKey: "k\(i % 20)")
-                    _ = cache.value(forKey: "k\(i % 20)")
+                    await cache.set(i, forKey: "k\(i % 20)")
+                    _ = await cache.value(forKey: "k\(i % 20)")
                 }
             }
         }

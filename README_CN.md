@@ -64,9 +64,11 @@ let cache = Cache<Int, Article>(
 try cache.set(article, forKey: 42)
 let fetched = try cache.value(forKey: 42)   // 先查内存，命中不了回退到磁盘
 
-// 异步
-try await cache.asyncSet(article, forKey: 42)
-let fetched2 = try await cache.asyncValue(forKey: 42)
+// 异步 —— 同名，直接加 `await`。同步版本标了
+// `@available(*, noasync)`，async 上下文里忘加 await 会警告
+// （Swift 6 strict concurrency 下直接报错）。
+try await cache.set(article, forKey: 42)
+let fetched2 = try await cache.value(forKey: 42)
 
 cache.remove(forKey: 42)
 cache.removeAll()

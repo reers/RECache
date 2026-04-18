@@ -314,8 +314,13 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     }
 
     // MARK: - Sync API
+    //
+    // The sync methods below are marked `@available(*, noasync)`: calling them
+    // from an async context triggers a warning (or an error under Swift 6 /
+    // strict concurrency). Use the `async` overloads with `await` instead.
 
     /// Returns whether a non-expired entry exists for `key`.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func contains(_ key: Key) -> Bool {
         let now = Date()
         os_unfair_lock_lock(lock)
@@ -329,6 +334,7 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     /// Reading **moves the entry to the head of the LRU list** but does **not**
     /// refresh its write time — expiration is evaluated against the original write.
     /// Expired entries are removed lazily here.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func value(forKey key: Key) -> Value? {
         let now = Date()
         os_unfair_lock_lock(lock)
@@ -351,6 +357,7 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     ///     `remove(forKey:)`.
     ///   - key: The key.
     ///   - cost: Cost of the entry in your chosen unit (bytes, items, ...).
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func set(_ value: Value?, forKey key: Key, cost: Int = 0) {
         guard let value = value else {
             remove(forKey: key)
@@ -395,6 +402,7 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     }
 
     /// Removes the entry for `key`, if any.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func remove(forKey key: Key) {
         os_unfair_lock_lock(lock)
         defer { os_unfair_lock_unlock(lock) }
@@ -405,6 +413,7 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     }
 
     /// Empties the cache.
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func removeAll() {
         os_unfair_lock_lock(lock)
         defer { os_unfair_lock_unlock(lock) }
@@ -412,6 +421,7 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     }
 
     /// Removes every entry whose expiration has passed. O(n).
+    @available(*, noasync, message: "Use `await` in async contexts.")
     public func removeExpired() {
         let now = Date()
         var holder: [LinkedListNode<Key, Value>] = []
@@ -457,8 +467,8 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
 
     // MARK: - Async API
 
-    /// Asynchronous variant of ``set(_:forKey:cost:)``.
-    public func asyncSet(_ value: Value?, forKey key: Key, cost: Int = 0) async {
+    /// Async overload of ``set(_:forKey:cost:)``.
+    public func set(_ value: Value?, forKey key: Key, cost: Int = 0) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async { [weak self] in
                 self?.set(value, forKey: key, cost: cost)
@@ -467,8 +477,8 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         }
     }
 
-    /// Asynchronous variant of ``value(forKey:)``.
-    public func asyncValue(forKey key: Key) async -> Value? {
+    /// Async overload of ``value(forKey:)``.
+    public func value(forKey key: Key) async -> Value? {
         await withCheckedContinuation { (continuation: CheckedContinuation<Value?, Never>) in
             queue.async { [weak self] in
                 continuation.resume(returning: self?.value(forKey: key))
@@ -476,8 +486,8 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         }
     }
 
-    /// Asynchronous variant of ``contains(_:)``.
-    public func asyncContains(_ key: Key) async -> Bool {
+    /// Async overload of ``contains(_:)``.
+    public func contains(_ key: Key) async -> Bool {
         await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             queue.async { [weak self] in
                 continuation.resume(returning: self?.contains(key) ?? false)
@@ -485,8 +495,8 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         }
     }
 
-    /// Asynchronous variant of ``remove(forKey:)``.
-    public func asyncRemove(forKey key: Key) async {
+    /// Async overload of ``remove(forKey:)``.
+    public func remove(forKey key: Key) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async { [weak self] in
                 self?.remove(forKey: key)
@@ -495,8 +505,8 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         }
     }
 
-    /// Asynchronous variant of ``removeAll()``.
-    public func asyncRemoveAll() async {
+    /// Async overload of ``removeAll()``.
+    public func removeAll() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async { [weak self] in
                 self?.removeAll()
@@ -505,8 +515,8 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         }
     }
 
-    /// Asynchronous variant of ``removeExpired()``.
-    public func asyncRemoveExpired() async {
+    /// Async overload of ``removeExpired()``.
+    public func removeExpired() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async { [weak self] in
                 self?.removeExpired()
