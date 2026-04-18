@@ -301,6 +301,21 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     @usableFromInline internal let lock: os_unfair_lock_t
     @usableFromInline internal let linkedList = LinkedList<Key, Value>()
     @usableFromInline internal let queue: DispatchQueue
+
+    /// Stored closure that asynchronously trims the cache down to
+    /// `costLimit`. Built **inside `init`** (not inlinable) so the
+    /// `[weak self]` / `DispatchQueue.async` closure literal never lives in
+    /// an `@inlinable` SIL body — that combination crashes the current
+    /// Swift SIL-deserializer during cross-module specialization. The
+    /// `@inlinable` `set(_:forKey:cost:)` only sees a single indirect call
+    /// to this property.
+    ///
+    /// Default `{ }` is just a placeholder so the stored property satisfies
+    /// `let`-style initialization; `init` overwrites it with the real
+    /// dispatching closure once all stored props are set.
+    @usableFromInline
+    internal var _scheduleAsyncTrim: @Sendable () -> Void = { }
+
     #if canImport(UIKit)
     private var memoryWarningObserver: (any NSObjectProtocol)?
     private var enterBackgroundObserver: (any NSObjectProtocol)?
@@ -338,6 +353,15 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
             }
         }
         #endif
+
+        // IMPORTANT: This closure literal must live in `init` (which is
+        // NOT `@inlinable`), never inside `set`. Otherwise cross-module
+        // SIL specialization of `set<Int, Data>` etc. crashes the compiler.
+        _scheduleAsyncTrim = { [weak self] in
+            self?.queue.async { [weak self] in
+                self?.trim(toCost: self?.costLimit ?? .max)
+            }
+        }
 
         trimRecursively()
     }
@@ -416,13 +440,12 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     // `set` is `@inlinable` so consumers get cross-module specialization
     // for concrete `Key` types (no per-call Hashable witness-table dispatch).
     //
-    // The body intentionally avoids any `[weak self]`/`DispatchQueue.async`
-    // closure that captures `self`: combining a generic class method with
-    // such a closure trips a SIL-deserializer crash on current Swift
-    // toolchains during cross-module specialization. Overflow trimming is
-    // therefore done synchronously here (YYCache does it asynchronously,
-    // but the trim cost is O(overflow), which is small and bounded; calling
-    // it inline avoids the closure entirely).
+    // The body intentionally delegates overflow trimming to the stored
+    // closure `_scheduleAsyncTrim` (built in `init`), never creating a
+    // `[weak self]`/`DispatchQueue.async` closure literal here. That
+    // combination inside an `@inlinable` generic-class body trips a SIL
+    // deserializer crash on current Swift toolchains during cross-module
+    // specialization. See the `_scheduleAsyncTrim` declaration for detail.
     @available(*, noasync, message: "Use `await` in async contexts.")
     @inlinable
     public func set(_ value: Value?, forKey key: Key, cost: Int = 0) {
@@ -465,9 +488,10 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         os_unfair_lock_unlock(lock)
 
         if overflowCost {
-            // Synchronous instead of the original `queue.async { [weak self] ... }`
-            // — see note above.
-            trim(toCost: costLimit)
+            // Delegate to the stored closure built in `init`. See the
+            // `_scheduleAsyncTrim` declaration for why the closure literal
+            // cannot live here.
+            _scheduleAsyncTrim()
         }
     }
 
