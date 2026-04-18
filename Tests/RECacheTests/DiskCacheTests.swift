@@ -206,4 +206,260 @@ struct DiskCacheTests {
         let u = try cache2.value(forKey: "u")
         #expect(u?.id == 1)
     }
+
+    // MARK: - Init failures / explicit storage types
+
+    @Test func initFailsOnEmptyPath() {
+        let cache = DiskCache<String, Int>(path: "", transformer: .codable())
+        #expect(cache == nil)
+    }
+
+    @Test func initSQLiteMode() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Data>(
+            path: dir,
+            transformer: .data(),
+            inlineThreshold: .max
+        )!
+        try cache.set(Data([1, 2, 3]), forKey: "k")
+        #expect(try cache.value(forKey: "k") == Data([1, 2, 3]))
+    }
+
+    @Test func initFileMode() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Data>(
+            path: dir,
+            transformer: .data(),
+            inlineThreshold: 0
+        )!
+        try cache.set(Data([9, 8, 7]), forKey: "k")
+        #expect(try cache.value(forKey: "k") == Data([9, 8, 7]))
+    }
+
+    // MARK: - isLoggingEnabled
+
+    @Test func loggingFlagRoundtrip() {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        #expect(cache.isLoggingEnabled == false)
+        cache.isLoggingEnabled = true
+        #expect(cache.isLoggingEnabled == true)
+        cache.isLoggingEnabled = false
+        #expect(cache.isLoggingEnabled == false)
+    }
+
+    // MARK: - fileNameProvider
+
+    @Test func customFileNameProviderUsed() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Data>(
+            path: dir,
+            transformer: .data(),
+            inlineThreshold: 10
+        )!
+        cache.fileNameProvider = { key in "provided-\(key).bin" }
+        try cache.set(Data(repeating: 0xAB, count: 256), forKey: "large")
+        let expectedPath = (dir as NSString)
+            .appendingPathComponent("data") as NSString
+        let filePath = expectedPath.appendingPathComponent("provided-large.bin")
+        #expect(FileManager.default.fileExists(atPath: filePath))
+    }
+
+    @Test func fileNameProviderReturningEmptyFallsBack() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Data>(
+            path: dir,
+            transformer: .data(),
+            inlineThreshold: 10
+        )!
+        cache.fileNameProvider = { _ in "" }
+        try cache.set(Data(repeating: 0x01, count: 200), forKey: "k")
+        #expect(try cache.value(forKey: "k")?.count == 200)
+    }
+
+    // MARK: - Trim / removeExpired / totalCost
+
+    @Test func trimToCost() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Data>(path: dir, transformer: .data())!
+        for i in 0..<10 {
+            try cache.set(Data(repeating: UInt8(i), count: 100), forKey: "k\(i)")
+        }
+        #expect(cache.totalCost() == 1000)
+        cache.trim(toCost: 300)
+        #expect(cache.totalCost() <= 300)
+    }
+
+    @Test func trimToCostIntMaxIsNoOp() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try cache.set(1, forKey: "a")
+        cache.trim(toCost: .max)
+        #expect(try cache.value(forKey: "a") == 1)
+    }
+
+    @Test func trimToCountIntMaxIsNoOp() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try cache.set(1, forKey: "a")
+        cache.trim(toCount: .max)
+        #expect(try cache.value(forKey: "a") == 1)
+    }
+
+    @Test func removeExpiredNeverIsNoOp() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try cache.set(1, forKey: "a")
+        cache.removeExpired()
+        #expect(try cache.value(forKey: "a") == 1)
+    }
+
+    @Test func removeExpiredDatePastWipes() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try cache.set(1, forKey: "a")
+        cache.expiration = .date(Date(timeIntervalSinceNow: -5))
+        cache.removeExpired()
+        #expect(cache.totalCount() == 0)
+    }
+
+    @Test func removeExpiredDateFutureKeeps() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try cache.set(1, forKey: "a")
+        cache.expiration = .date(Date(timeIntervalSinceNow: 60))
+        cache.removeExpired()
+        #expect(cache.totalCount() == 1)
+    }
+
+    @Test func removeExpiredSeconds() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try await cache.set(1, forKey: "a")
+        // Large-but-reasonable window so we exercise the code path without
+        // actually deleting the row (otherwise we wait ≥2s real time).
+        cache.expiration = .seconds(3600)
+        await cache.removeExpired()
+        #expect(try await cache.value(forKey: "a") == 1)
+    }
+
+    // MARK: - Async API
+
+    @Test func asyncValueWithExtendedData() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try await cache.set(42, forKey: "k", extendedData: Data([1, 2]))
+        let pair = try await cache.valueWithExtendedData(forKey: "k")
+        #expect(pair?.value == 42)
+        #expect(pair?.extendedData == Data([1, 2]))
+        let miss = try await cache.valueWithExtendedData(forKey: "nope")
+        #expect(miss == nil)
+    }
+
+    @Test func asyncRemoveAll() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        for i in 0..<5 { try await cache.set(i, forKey: "k\(i)") }
+        await cache.removeAll()
+        #expect(cache.totalCount() == 0)
+    }
+
+    @Test func asyncRemoveExpired() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try await cache.set(1, forKey: "a")
+        cache.expiration = .date(Date(timeIntervalSinceNow: -5))
+        await cache.removeExpired()
+        #expect(cache.totalCount() == 0)
+    }
+
+    @Test func asyncSetNilRemoves() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try await cache.set(1, forKey: "a")
+        try await cache.set(nil, forKey: "a")
+        #expect(try await cache.value(forKey: "a") == nil)
+    }
+
+    @Test func asyncSetEmptyStringKeyIsNoop() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try await cache.set(1, forKey: "")
+        #expect(try await cache.value(forKey: "") == nil)
+        let hit = await cache.contains("")
+        #expect(hit == false)
+        let ed = await cache.extendedData(forKey: "")
+        #expect(ed == nil)
+    }
+
+    @Test func asyncRemoveAllWithProgress() async {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        for i in 0..<5 { try? await cache.set(i, forKey: "k\(i)") }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            cache.asyncRemoveAll(progress: { _, _ in }) { error in
+                #expect(error == false)
+                cont.resume()
+            }
+        }
+        #expect(cache.totalCount() == 0)
+    }
+
+    // MARK: - Description
+
+    @Test func descriptionIncludesPath() {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        #expect(cache.description.contains(dir))
+    }
+
+    @Test func descriptionIncludesName() {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        cache.name = "named"
+        #expect(cache.description.contains("named"))
+    }
+
+    // MARK: - Sync expiration cleanup
+
+    /// Exercises the lazy-removal branch inside synchronous `contains(_:)`
+    /// when the stored entry is past its expiration date.
+    @Test func syncContainsRemovesExpired() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try cache.set(1, forKey: "a")
+        cache.expiration = .date(Date(timeIntervalSinceNow: -5))
+        #expect(cache.contains("a") == false)
+        #expect(cache.totalCount() == 0)
+    }
+
+    /// Exercises the lazy-removal branch inside synchronous
+    /// `valueWithExtendedData(forKey:)` when the entry is expired.
+    @Test func syncValueWithExtendedDataRemovesExpired() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try cache.set(1, forKey: "a", extendedData: Data([0x01]))
+        cache.expiration = .date(Date(timeIntervalSinceNow: -5))
+        let pair = try cache.valueWithExtendedData(forKey: "a")
+        #expect(pair == nil)
+        #expect(cache.totalCount() == 0)
+    }
+
+    // MARK: - Configuration smoke
+
+    /// Smoke test for the tunables. The auto-trim background loop is scheduled
+    /// with the `autoTrimInterval` captured at `init` (default 60s), so we
+    /// can't reliably reduce it at runtime inside a unit test. We verify that
+    /// assigning these knobs doesn't disturb normal operation.
+    @Test func tunablesSmoke() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        cache.countLimit = 100
+        cache.costLimit = 10_000
+        cache.expiration = .never
+        cache.freeDiskSpaceLimit = 1
+        cache.autoTrimInterval = 0.1
+        try await cache.set(1, forKey: "a")
+        #expect(try await cache.value(forKey: "a") == 1)
+    }
 }

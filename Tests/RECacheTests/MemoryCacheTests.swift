@@ -116,6 +116,22 @@ struct MemoryCacheTests {
         #expect(cache.totalCount == 0)
     }
 
+    @Test func trimToCostZeroRemovesAll() {
+        let cache = MemoryCache<String, Int>()
+        cache.set(1, forKey: "a", cost: 5)
+        cache.set(2, forKey: "b", cost: 5)
+        cache.trim(toCost: 0)
+        #expect(cache.totalCount == 0)
+        #expect(cache.totalCost == 0)
+    }
+
+    @Test func trimToCostAboveCurrentIsNoOp() {
+        let cache = MemoryCache<String, Int>()
+        cache.set(1, forKey: "a", cost: 5)
+        cache.trim(toCost: 100)
+        #expect(cache.totalCount == 1)
+    }
+
     // MARK: - Expiration
 
     @Test func defaultExpirationNever() {
@@ -126,10 +142,10 @@ struct MemoryCacheTests {
 
     @Test func cacheLevelExpirationSecondsEvicts() async throws {
         let cache = MemoryCache<String, Int>()
-        cache.expiration = .seconds(0.1)
+        cache.expiration = .seconds(0.4)
         await cache.set(1, forKey: "a")
         #expect(await cache.value(forKey: "a") == 1)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        try await Task.sleep(nanoseconds: 500_000_000)
         #expect(await cache.value(forKey: "a") == nil)
         #expect(cache.totalCount == 0)
     }
@@ -211,6 +227,86 @@ struct MemoryCacheTests {
         cache.set(99, forKey: Key(user: 1, scope: "a"))
         #expect(cache.value(forKey: Key(user: 1, scope: "a")) == 99)
         #expect(cache.value(forKey: Key(user: 2, scope: "a")) == nil)
+    }
+
+    // MARK: - Release flags (read/write the backing linked list)
+
+    @Test func releaseOnMainThreadFlag() {
+        let cache = MemoryCache<String, Int>()
+        #expect(cache.releaseOnMainThread == false)
+        cache.releaseOnMainThread = true
+        #expect(cache.releaseOnMainThread == true)
+        cache.releaseOnMainThread = false
+        #expect(cache.releaseOnMainThread == false)
+    }
+
+    @Test func releaseAsynchronouslyFlag() {
+        let cache = MemoryCache<String, Int>()
+        #expect(cache.releaseAsynchronously == true)
+        cache.releaseAsynchronously = false
+        #expect(cache.releaseAsynchronously == false)
+        cache.releaseAsynchronously = true
+        #expect(cache.releaseAsynchronously == true)
+    }
+
+    /// Exercises the `releaseAsynchronously = true` (default) path through
+    /// `scheduleRelease` / `LinkedList.removeAll` / `_trimToCost` / `_trimToCount`
+    /// where nodes are dispatched to a background queue for release.
+    @Test func releaseAsyncPathsRun() async {
+        let cache = MemoryCache<String, Int>()
+        cache.releaseAsynchronously = true
+        for i in 0..<5 { await cache.set(i, forKey: "k\(i)", cost: 10) }
+        cache.trim(toCount: 2)
+        #expect(cache.totalCount == 2)
+        cache.trim(toCost: 5)
+        await cache.set(9, forKey: "solo", cost: 1)
+        await cache.remove(forKey: "solo")
+        await cache.removeAll()
+        // Give the async release dispatches time to drain.
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(cache.totalCount == 0)
+    }
+
+    /// Exercises the `releaseAsynchronously = false && releaseOnMainThread` branch
+    /// of `scheduleRelease` / `LinkedList.removeAll`.
+    @Test func releaseSyncOnMainThreadPath() async {
+        let cache = MemoryCache<String, Int>()
+        cache.releaseAsynchronously = false
+        cache.releaseOnMainThread = true
+        for i in 0..<3 { await cache.set(i, forKey: "k\(i)") }
+        await cache.remove(forKey: "k0")
+        await cache.removeAll()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(cache.totalCount == 0)
+    }
+
+    // MARK: - CustomStringConvertible
+
+    @Test func descriptionWithoutName() {
+        let cache = MemoryCache<String, Int>()
+        let desc = cache.description
+        #expect(desc.contains("MemoryCache"))
+    }
+
+    @Test func descriptionWithName() {
+        let cache = MemoryCache<String, Int>()
+        cache.name = "memo"
+        #expect(cache.description.contains("memo"))
+    }
+
+    // MARK: - Auto-trim
+
+    /// Drives `trimRecursively` / `trimInBackground` by dropping the interval
+    /// and waiting. Asserts the count shrinks to `countLimit` without manual
+    /// `trim(toCount:)` calls.
+    @Test func autoTrimRunsInBackground() async throws {
+        let cache = MemoryCache<String, Int>()
+        cache.autoTrimInterval = 0.1
+        cache.countLimit = 2
+        for i in 0..<6 { await cache.set(i, forKey: "k\(i)") }
+        // Wait a few auto-trim cycles.
+        try await Task.sleep(nanoseconds: 500_000_000)
+        #expect(cache.totalCount <= 2)
     }
 
     // MARK: - Concurrent access smoke test

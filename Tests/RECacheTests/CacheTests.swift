@@ -138,4 +138,77 @@ struct CacheTests {
         try cache.set("hello", forKey: 1)
         #expect(try cache.value(forKey: 1) == "hello")
     }
+
+    // MARK: - Async disk-hit repopulates memory
+
+    @Test func asyncDiskHitRepopulatesMemory() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
+        let p = Profile(id: 7, handle: "async-disk")
+        try await cache.set(p, forKey: "k")
+        await cache.memoryCache.removeAll()
+        #expect(!(await cache.memoryCache.contains("k")))
+        let fetched = try await cache.value(forKey: "k")
+        #expect(fetched == p)
+        #expect(await cache.memoryCache.contains("k"))
+    }
+
+    @Test func asyncValueMissReturnsNil() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
+        #expect(try await cache.value(forKey: "absent") == nil)
+    }
+
+    // MARK: - Async removeAll / setNil / contains miss
+
+    @Test func asyncRemoveAllClearsBothLayers() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
+        for i in 0..<5 {
+            try await cache.set(Profile(id: i, handle: "h\(i)"), forKey: "k\(i)")
+        }
+        await cache.removeAll()
+        #expect(cache.memoryCache.totalCount == 0)
+        #expect(cache.diskCache.totalCount() == 0)
+    }
+
+    @Test func asyncSetNilRemovesFromBothLayers() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
+        try await cache.set(Profile(id: 1, handle: "x"), forKey: "k")
+        try await cache.set(nil, forKey: "k")
+        #expect(!(await cache.contains("k")))
+    }
+
+    @Test func asyncContainsMiss() async {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
+        #expect(!(await cache.contains("nope")))
+    }
+
+    // MARK: - asyncRemoveAll (progress + completion)
+
+    @Test func asyncRemoveAllWithProgressCallbacks() async throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
+        for i in 0..<4 {
+            try await cache.set(Profile(id: i, handle: "h\(i)"), forKey: "k\(i)")
+        }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            cache.asyncRemoveAll(progress: { _, _ in }) { error in
+                #expect(error == false)
+                cont.resume()
+            }
+        }
+        #expect(cache.diskCache.totalCount() == 0)
+        #expect(cache.memoryCache.totalCount == 0)
+    }
+
+    // MARK: - Description
+
+    @Test func descriptionIncludesName() {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
+        #expect(cache.description.contains(cache.name))
+    }
 }

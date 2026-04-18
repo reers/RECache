@@ -805,6 +805,116 @@ struct KVStorageTests {
         #expect(storage.itemExists(forKey: "large") == false)
     }
 
+    @Test func removeItemsFileModeMultiKeys() {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        guard let storage = KVStorage(path: dir, type: .file) else {
+            Issue.record("Failed to create storage")
+            return
+        }
+
+        storage.saveItem(withKey: "a", value: Data("va".utf8), filename: "a.dat", extendedData: nil)
+        storage.saveItem(withKey: "b", value: Data("vb".utf8), filename: "b.dat", extendedData: nil)
+        storage.saveItem(withKey: "c", value: Data("vc".utf8), filename: "c.dat", extendedData: nil)
+        #expect(storage.getItemsCount() == 3)
+
+        let dataPath = (dir as NSString).appendingPathComponent("data")
+        let aPath = (dataPath as NSString).appendingPathComponent("a.dat")
+        let bPath = (dataPath as NSString).appendingPathComponent("b.dat")
+
+        #expect(storage.removeItem(forKeys: ["a", "b"]) == true)
+        #expect(storage.getItemsCount() == 1)
+        #expect(storage.itemExists(forKey: "c") == true)
+        #expect(FileManager.default.fileExists(atPath: aPath) == false)
+        #expect(FileManager.default.fileExists(atPath: bPath) == false)
+    }
+
+    @Test func removeItemsEarlierThanTimeFileMode() {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        guard let storage = KVStorage(path: dir, type: .file) else {
+            Issue.record("Failed to create storage")
+            return
+        }
+
+        storage.saveItem(withKey: "k", value: Data("v".utf8), filename: "k.dat", extendedData: nil)
+        let dataPath = (dir as NSString).appendingPathComponent("data")
+        let filePath = (dataPath as NSString).appendingPathComponent("k.dat")
+        #expect(FileManager.default.fileExists(atPath: filePath))
+
+        let futureTime = Int32(time(nil)) + 100
+        #expect(storage.removeItemsEarlierThanTime(futureTime) == true)
+        #expect(storage.getItemsCount() == 0)
+        #expect(FileManager.default.fileExists(atPath: filePath) == false)
+    }
+
+    // MARK: - Get/Read fallbacks when backing file is missing
+
+    /// When a mixed-mode entry lives on disk but its file is removed out from
+    /// under us, `getItem` / `getItemValue` should fall back to deleting the
+    /// row and returning `nil`. Exercises the file-read-nil cleanup branches
+    /// in `dbGetItem` / `dbGetItemValue`.
+    @Test func fileDisappearedFallback() {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        guard let storage = KVStorage(path: dir, type: .mixed) else {
+            Issue.record("Failed to create storage")
+            return
+        }
+
+        storage.saveItem(withKey: "k", value: Data("body".utf8), filename: "gone.dat", extendedData: nil)
+        let dataPath = (dir as NSString).appendingPathComponent("data")
+        let filePath = (dataPath as NSString).appendingPathComponent("gone.dat")
+        try? FileManager.default.removeItem(atPath: filePath)
+
+        #expect(storage.getItemValue(forKey: "k") == nil)
+        #expect(storage.getItem(forKey: "k") == nil)
+    }
+
+    /// Multi-key fetch where one underlying file is missing — the present
+    /// entry should still round-trip, the missing one should be pruned.
+    @Test func getMultipleItemsFileMissingPrunes() {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        guard let storage = KVStorage(path: dir, type: .mixed) else {
+            Issue.record("Failed to create storage")
+            return
+        }
+
+        storage.saveItem(withKey: "ok", value: Data("ok-body".utf8), filename: "ok.dat", extendedData: nil)
+        storage.saveItem(withKey: "gone", value: Data("gone-body".utf8), filename: "gone.dat", extendedData: nil)
+
+        let dataPath = (dir as NSString).appendingPathComponent("data")
+        let gonePath = (dataPath as NSString).appendingPathComponent("gone.dat")
+        try? FileManager.default.removeItem(atPath: gonePath)
+
+        let items = storage.getItem(forKeys: ["ok", "gone"])
+        #expect(items?.count == 1)
+        #expect(items?.first?.key == "ok")
+    }
+
+    // MARK: - removeItemsToFitSize file mode (exercises file-delete branch in trim)
+
+    @Test func removeItemsToFitSizeFileMode() {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        guard let storage = KVStorage(path: dir, type: .file) else {
+            Issue.record("Failed to create storage")
+            return
+        }
+        for i in 0..<5 {
+            storage.saveItem(
+                withKey: "key\(i)",
+                value: Data(repeating: UInt8(i), count: 100),
+                filename: "f\(i).dat",
+                extendedData: nil
+            )
+        }
+        #expect(storage.getItemsSize() == 500)
+        #expect(storage.removeItemsToFitSize(200) == true)
+        #expect(storage.getItemsSize() <= 200)
+    }
+
     @Test func removeItemsToFitCountFileMode() {
         let dir = makeTempDir()
         defer { cleanup(dir) }
