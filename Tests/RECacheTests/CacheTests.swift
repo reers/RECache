@@ -24,19 +24,19 @@ struct CacheTests {
 
     @Test func initWithName() {
         let cache = Cache<String, Profile>(name: "RECacheTests-\(UUID().uuidString)",
-                                           transformer: Transformers.codable())
+                                           transformer: .codable())
         #expect(cache != nil)
         cache?.removeAll()
     }
 
     @Test func initWithPath() {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = Cache<String, Profile>(path: dir, transformer: Transformers.codable())
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())
         #expect(cache != nil)
     }
 
     @Test func initFailsOnEmptyPath() {
-        let cache = Cache<String, Profile>(path: "", transformer: Transformers.codable())
+        let cache = Cache<String, Profile>(path: "", transformer: .codable())
         #expect(cache == nil)
     }
 
@@ -44,7 +44,7 @@ struct CacheTests {
 
     @Test func setGoesToBothLayers() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = Cache<String, Profile>(path: dir, transformer: Transformers.codable())!
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
         let p = Profile(id: 1, handle: "alice")
         try cache.set(p, forKey: "a")
         #expect(cache.memoryCache.contains("a"))
@@ -53,7 +53,7 @@ struct CacheTests {
 
     @Test func diskHitRepopulatesMemory() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = Cache<String, Profile>(path: dir, transformer: Transformers.codable())!
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
         let p = Profile(id: 2, handle: "bob")
         try cache.set(p, forKey: "b")
         cache.memoryCache.removeAll()
@@ -65,7 +65,7 @@ struct CacheTests {
 
     @Test func removeAffectsBothLayers() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = Cache<String, Profile>(path: dir, transformer: Transformers.codable())!
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
         try cache.set(Profile(id: 3, handle: "carol"), forKey: "c")
         cache.remove(forKey: "c")
         #expect(!cache.memoryCache.contains("c"))
@@ -74,7 +74,7 @@ struct CacheTests {
 
     @Test func removeAllAffectsBothLayers() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = Cache<String, Profile>(path: dir, transformer: Transformers.codable())!
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
         for i in 0..<10 {
             try cache.set(Profile(id: i, handle: "h\(i)"), forKey: "k\(i)")
         }
@@ -87,7 +87,7 @@ struct CacheTests {
 
     @Test func setNilRemoves() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = Cache<String, Profile>(path: dir, transformer: Transformers.codable())!
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
         try cache.set(Profile(id: 1, handle: "x"), forKey: "k")
         try cache.set(nil, forKey: "k")
         #expect(!cache.contains("k"))
@@ -97,7 +97,7 @@ struct CacheTests {
 
     @Test func extendedDataPersisted() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = Cache<String, Profile>(path: dir, transformer: Transformers.codable())!
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
         let meta = "v=1".data(using: .utf8)!
         try cache.set(Profile(id: 1, handle: "e"), forKey: "k", extendedData: meta)
         #expect(cache.extendedData(forKey: "k") == meta)
@@ -107,7 +107,7 @@ struct CacheTests {
 
     @Test func cacheLevelExpirationAppliesToBothLayers() async throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = Cache<String, Profile>(path: dir, transformer: Transformers.codable())!
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
         cache.memoryCache.expiration = .seconds(0.1)
         cache.diskCache.expiration = .seconds(1)
         try await cache.set(Profile(id: 1, handle: "e"), forKey: "k")
@@ -121,7 +121,7 @@ struct CacheTests {
 
     @Test func asyncRoundtrip() async throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = Cache<String, Profile>(path: dir, transformer: Transformers.codable())!
+        let cache = Cache<String, Profile>(path: dir, transformer: .codable())!
         let p = Profile(id: 9, handle: "z")
         try await cache.set(p, forKey: "k")
         let fetched = try await cache.value(forKey: "k")
@@ -134,7 +134,7 @@ struct CacheTests {
 
     @Test func intKeyRoundtrip() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = Cache<Int, String>(path: dir, transformer: Transformers.codable())!
+        let cache = Cache<Int, String>(path: dir, transformer: .codable())!
         try cache.set("hello", forKey: 1)
         #expect(try cache.value(forKey: 1) == "hello")
     }

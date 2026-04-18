@@ -57,7 +57,7 @@ struct Article: Codable, Sendable {
 
 let cache = Cache<Int, Article>(
     name: "articles",
-    transformer: Transformers.codable()
+    transformer: .codable()
 )!
 
 // Sync
@@ -79,7 +79,7 @@ cache.removeAll()
 ```swift
 let blobs = DiskCache<String, Data>(
     path: "/tmp/blobs",
-    transformer: Transformers.data()
+    transformer: .data()
 )!
 
 try blobs.set(Data(...), forKey: "thumbnail")
@@ -92,7 +92,7 @@ let data = try blobs.value(forKey: "thumbnail")
 #if canImport(UIKit)
 let images = DiskCache<URL, UIImage>(
     path: NSTemporaryDirectory() + "images",
-    transformer: Transformers.image()
+    transformer: .image()
 )!
 #endif
 ```

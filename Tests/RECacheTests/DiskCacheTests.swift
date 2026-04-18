@@ -27,7 +27,7 @@ struct DiskCacheTests {
 
     @Test func codableRoundtrip() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, User>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, User>(path: dir, transformer: .codable())!
         let user = User(id: 1, name: "Alice", tags: ["a", "b"])
         try cache.set(user, forKey: "u1")
         #expect(cache.contains("u1"))
@@ -39,7 +39,7 @@ struct DiskCacheTests {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         let cache = DiskCache<String, User>(
             path: dir,
-            transformer: Transformers.codable(format: .binaryPlist)
+            transformer: .codable(format: .binaryPlist)
         )!
         let user = User(id: 2, name: "Bob", tags: [])
         try cache.set(user, forKey: "u2")
@@ -49,7 +49,7 @@ struct DiskCacheTests {
 
     @Test func dataTransformer() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, Data>(path: dir, transformer: Transformers.data())!
+        let cache = DiskCache<String, Data>(path: dir, transformer: .data())!
         let payload = Data((0..<256).map { UInt8($0 & 0xff) })
         try cache.set(payload, forKey: "blob")
         let back = try cache.value(forKey: "blob")
@@ -58,13 +58,13 @@ struct DiskCacheTests {
 
     @Test func missReturnsNil() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
         #expect(try cache.value(forKey: "missing") == nil)
     }
 
     @Test func setNilRemoves() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
         try cache.set(1, forKey: "a")
         try cache.set(nil, forKey: "a")
         #expect(try cache.value(forKey: "a") == nil)
@@ -72,7 +72,7 @@ struct DiskCacheTests {
 
     @Test func remove() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
         try cache.set(1, forKey: "a")
         cache.remove(forKey: "a")
         #expect(try cache.value(forKey: "a") == nil)
@@ -80,7 +80,7 @@ struct DiskCacheTests {
 
     @Test func removeAll() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
         for i in 0..<20 { try cache.set(i, forKey: "k\(i)") }
         cache.removeAll()
         #expect(cache.totalCount() == 0)
@@ -90,7 +90,7 @@ struct DiskCacheTests {
 
     @Test func extendedDataRoundtrip() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, User>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, User>(path: dir, transformer: .codable())!
         let meta = "etag:abc123".data(using: .utf8)!
         let user = User(id: 3, name: "Carol", tags: ["x"])
         try cache.set(user, forKey: "u3", extendedData: meta)
@@ -102,7 +102,7 @@ struct DiskCacheTests {
 
     @Test func extendedDataNilAfterRemove() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
         let meta = Data([1, 2, 3])
         try cache.set(42, forKey: "k", extendedData: meta)
         cache.remove(forKey: "k")
@@ -113,7 +113,7 @@ struct DiskCacheTests {
 
     @Test func cacheLevelExpirationSeconds() async throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
         cache.expiration = .seconds(1)
         try await cache.set(1, forKey: "a")
         #expect(try await cache.value(forKey: "a") == 1)
@@ -123,7 +123,7 @@ struct DiskCacheTests {
 
     @Test func cacheLevelExpirationDatePast() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
         try cache.set(1, forKey: "a")
         #expect(try cache.value(forKey: "a") == 1)
         cache.expiration = .date(Date(timeIntervalSinceNow: -10))
@@ -132,7 +132,7 @@ struct DiskCacheTests {
 
     @Test func cacheLevelExpirationNeverKeepsEntries() async throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
         try await cache.set(1, forKey: "a")
         try await Task.sleep(nanoseconds: 50_000_000)
         #expect(try await cache.value(forKey: "a") == 1)
@@ -144,7 +144,7 @@ struct DiskCacheTests {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         let cache = DiskCache<String, Data>(
             path: dir,
-            transformer: Transformers.data(),
+            transformer: .data(),
             inlineThreshold: 100
         )!
         let bigBlob = Data(count: 2048)
@@ -157,7 +157,7 @@ struct DiskCacheTests {
 
     @Test func asyncRoundtrip() async throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, User>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, User>(path: dir, transformer: .codable())!
         let user = User(id: 10, name: "Dan", tags: [])
         try await cache.set(user, forKey: "u")
         #expect(await cache.contains("u"))
@@ -169,7 +169,7 @@ struct DiskCacheTests {
 
     @Test func asyncExtendedData() async throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
         try await cache.set(1, forKey: "k", extendedData: Data([9, 9, 9]))
         let ed = await cache.extendedData(forKey: "k")
         #expect(ed == Data([9, 9, 9]))
@@ -179,7 +179,7 @@ struct DiskCacheTests {
 
     @Test func intKeyRoundtrip() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<Int, String>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<Int, String>(path: dir, transformer: .codable())!
         try cache.set("one", forKey: 1)
         try cache.set("two", forKey: 2)
         #expect(try cache.value(forKey: 1) == "one")
@@ -190,7 +190,7 @@ struct DiskCacheTests {
 
     @Test func trimToCount() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
-        let cache = DiskCache<String, Int>(path: dir, transformer: Transformers.codable())!
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
         for i in 0..<20 { try cache.set(i, forKey: "k\(i)") }
         cache.trim(toCount: 5)
         #expect(cache.totalCount() <= 5)
@@ -199,10 +199,10 @@ struct DiskCacheTests {
     @Test func persistsAcrossInstances() throws {
         let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
         do {
-            let cache = DiskCache<String, User>(path: dir, transformer: Transformers.codable())!
+            let cache = DiskCache<String, User>(path: dir, transformer: .codable())!
             try cache.set(User(id: 1, name: "X", tags: []), forKey: "u")
         }
-        let cache2 = DiskCache<String, User>(path: dir, transformer: Transformers.codable())!
+        let cache2 = DiskCache<String, User>(path: dir, transformer: .codable())!
         let u = try cache2.value(forKey: "u")
         #expect(u?.id == 1)
     }

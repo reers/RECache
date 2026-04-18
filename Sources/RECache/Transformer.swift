@@ -33,10 +33,14 @@ import AppKit
 /// `DiskCache` requires a transformer to serialize values to the SQLite
 /// blob / file store and to deserialize them back.
 ///
-/// Use the factories in ``Transformers`` for the common cases:
-/// - ``Transformers/data()`` — pass-through for `Data`
-/// - ``Transformers/codable(_:format:)`` — any `Codable` value
-/// - ``Transformers/image()`` — `UIImage` / `NSImage` (platform-dependent)
+/// Built-in factories live as `static` members on `Transformer` itself and
+/// are selected via the value type of the surrounding context:
+/// - ``Transformer/data()`` — pass-through for `Data`
+/// - ``Transformer/codable(format:)`` — any `Codable` value
+/// - ``Transformer/image()`` — `UIImage` / `NSImage` (platform-dependent)
+///
+/// Thanks to Swift's leading-dot syntax, call sites typically read as
+/// `transformer: .codable()` / `.data()` / `.image()`.
 public struct Transformer<Value: Sendable>: Sendable {
     /// Encode a value to `Data`. Throw to signal encoding failure.
     public let encode: @Sendable (Value) throws -> Data
@@ -69,12 +73,9 @@ public enum CodableFormat: Sendable {
     case binaryPlist
 }
 
-// MARK: - Transformers factory
+// MARK: - Data
 
-/// Built-in `Transformer` factories. Prefer these over hand-rolled closures
-/// unless you need a custom on-disk representation.
-public enum Transformers {
-
+extension Transformer where Value == Data {
     /// Identity transformer for raw `Data` values.
     ///
     /// Zero encoding overhead — useful for caching prebuilt payloads
@@ -85,19 +86,18 @@ public enum Transformers {
             decode: { $0 }
         )
     }
+}
 
+// MARK: - Codable
+
+extension Transformer where Value: Codable {
     /// `Codable` transformer with selectable wire format.
     ///
-    /// - Parameters:
-    ///   - type: The value type (inferred in most call sites).
-    ///   - format: ``CodableFormat/json`` (default) or
-    ///     ``CodableFormat/binaryPlist``. Pick `.binaryPlist` when the payload
-    ///     is dominated by `Data` fields — it avoids base64 and is ~2–3×
-    ///     faster in that specific case.
-    public static func codable<T: Codable & Sendable>(
-        _ type: T.Type = T.self,
-        format: CodableFormat = .json
-    ) -> Transformer<T> {
+    /// - Parameter format: ``CodableFormat/json`` (default) or
+    ///   ``CodableFormat/binaryPlist``. Pick `.binaryPlist` when the payload
+    ///   is dominated by `Data` fields — it avoids base64 and is ~2–3×
+    ///   faster in that specific case.
+    public static func codable(format: CodableFormat = .json) -> Transformer<Value> {
         switch format {
         case .json:
             return Transformer(
@@ -112,7 +112,7 @@ public enum Transformers {
                     let decoder = JSONDecoder()
                     decoder.dateDecodingStrategy = .iso8601
                     decoder.dataDecodingStrategy = .base64
-                    do { return try decoder.decode(T.self, from: data) }
+                    do { return try decoder.decode(Value.self, from: data) }
                     catch { throw CacheError.decodingFailed(error) }
                 }
             )
@@ -126,7 +126,7 @@ public enum Transformers {
                 },
                 decode: { data in
                     let decoder = PropertyListDecoder()
-                    do { return try decoder.decode(T.self, from: data) }
+                    do { return try decoder.decode(Value.self, from: data) }
                     catch { throw CacheError.decodingFailed(error) }
                 }
             )
@@ -134,22 +134,54 @@ public enum Transformers {
     }
 }
 
-// MARK: - Image transformer (platform-dependent)
+// MARK: - Image (platform-dependent)
+
+#if canImport(UIKit) || canImport(AppKit)
+import CoreGraphics
+
+/// Reads `CGImage.alphaInfo` to determine whether the pixel buffer actually
+/// carries alpha. Matches the test used by Kingfisher / SDWebImage.
+private func cgImageHasAlpha(_ cgImage: CGImage?) -> Bool {
+    guard let alphaInfo = cgImage?.alphaInfo else { return false }
+    switch alphaInfo {
+    case .none, .noneSkipLast, .noneSkipFirst:
+        return false
+    default:
+        return true
+    }
+}
+#endif
 
 #if canImport(UIKit)
-public extension Transformers {
-    /// `UIImage` transformer. Encodes as PNG (preserves alpha); decodes via
-    /// `UIImage(data:)`.
+extension Transformer where Value == UIImage {
+    /// `UIImage` transformer with alpha-aware encoding:
     ///
-    /// If you need JPEG or a non-default compression quality, build your own
-    /// `Transformer<UIImage>` with a custom `encode` closure.
-    static func image() -> Transformer<UIImage> {
+    /// - images **with** an alpha channel are encoded as **PNG** (preserves
+    ///   transparency, lossless);
+    /// - images **without** alpha (typical photos) are encoded as **JPEG**
+    ///   (much smaller on disk at the same visual quality).
+    ///
+    /// This mirrors the defaults used by Kingfisher's `DefaultCacheSerializer`
+    /// and SDWebImage.
+    ///
+    /// Decodes via `UIImage(data:)`.
+    ///
+    /// - Parameter jpegCompressionQuality: JPEG quality in `[0.0, 1.0]`,
+    ///   applied only when the source image has no alpha. Default: `1.0`
+    ///   (visually lossless, largest file). Drop to `0.85`–`0.9` for a
+    ///   ~3–5× size reduction with barely perceptible loss.
+    public static func image(jpegCompressionQuality: CGFloat = 1.0) -> Transformer<UIImage> {
         Transformer(
             encode: { image in
-                guard let data = image.pngData() else {
+                let hasAlpha = cgImageHasAlpha(image.cgImage)
+                let data: Data? = hasAlpha
+                    ? image.pngData()
+                    : image.jpegData(compressionQuality: jpegCompressionQuality)
+                guard let data else {
                     throw CacheError.encodingFailed(
                         NSError(domain: "RECache.Transformer.Image", code: -1,
-                                userInfo: [NSLocalizedDescriptionKey: "UIImage.pngData() returned nil"])
+                                userInfo: [NSLocalizedDescriptionKey:
+                                    "UIImage -> \(hasAlpha ? "PNG" : "JPEG") data failed"])
                     )
                 }
                 return data
@@ -167,19 +199,44 @@ public extension Transformers {
     }
 }
 #elseif canImport(AppKit)
-public extension Transformers {
-    /// `NSImage` transformer. Encodes as PNG; decodes via `NSImage(data:)`.
+extension Transformer where Value == NSImage {
+    /// `NSImage` transformer with alpha-aware encoding:
+    ///
+    /// - images **with** an alpha channel are encoded as **PNG**;
+    /// - images **without** alpha are encoded as **JPEG**.
+    ///
+    /// Decodes via `NSImage(data:)`.
+    ///
+    /// - Parameter jpegCompressionQuality: JPEG quality in `[0.0, 1.0]`,
+    ///   applied only when the source image has no alpha. Default: `1.0`.
+    ///
+    /// - Note: `@available(macOS 14.0, *)` because `NSImage`'s `Sendable`
+    ///   conformance (required by `Transformer`) only ships in macOS 14+.
     @available(macOS 14.0, *)
-    static func image() -> Transformer<NSImage> {
+    public static func image(jpegCompressionQuality: CGFloat = 1.0) -> Transformer<NSImage> {
         Transformer(
             encode: { image in
-                guard let tiff = image.tiffRepresentation,
-                      let rep = NSBitmapImageRep(data: tiff),
-                      let data = rep.representation(using: .png, properties: [:])
-                else {
+                let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+                let hasAlpha = cgImageHasAlpha(cgImage)
+                let data: Data?
+                if let cgImage {
+                    let rep = NSBitmapImageRep(cgImage: cgImage)
+                    if hasAlpha {
+                        data = rep.representation(using: .png, properties: [:])
+                    } else {
+                        data = rep.representation(
+                            using: .jpeg,
+                            properties: [.compressionFactor: jpegCompressionQuality]
+                        )
+                    }
+                } else {
+                    data = nil
+                }
+                guard let data else {
                     throw CacheError.encodingFailed(
                         NSError(domain: "RECache.Transformer.Image", code: -1,
-                                userInfo: [NSLocalizedDescriptionKey: "NSImage -> PNG data failed"])
+                                userInfo: [NSLocalizedDescriptionKey:
+                                    "NSImage -> \(hasAlpha ? "PNG" : "JPEG") data failed"])
                     )
                 }
                 return data
