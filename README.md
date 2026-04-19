@@ -9,7 +9,7 @@
 
 ---
 
-RECache is a modern, generic, **memory + disk** two-tier key-value cache for Swift. It was originally ported from [YYCache](https://github.com/ibireme/YYCache) but **v2 breaks API compatibility** to embrace a fully generic, `Codable`-friendly, `async/await`-native Swift design. The SQLite + file-system storage engine and LRU algorithms that made YYCache fast are preserved verbatim — only the interface layer was rewritten.
+RECache is a modern, generic, **memory + disk** two-tier key-value cache for Swift. It was originally ported from [YYCache](https://github.com/ibireme/YYCache) and redesigned to embrace a fully generic, `Codable`-friendly, `async/await`-native Swift design. The SQLite + file-system storage engine and LRU algorithms that made YYCache fast are preserved verbatim — only the interface layer was rewritten.
 
 ---
 
@@ -232,6 +232,44 @@ For file names (used when values spill to standalone files on disk), override vi
 ```swift
 diskCache.fileNameProvider = { key in "item-\(key.userID)" }
 ```
+
+---
+
+## 📊 Benchmark
+
+Tested on **iPhone 15 Pro**, 200,000 key-value pairs for memory, 1,000 key-value pairs for disk. All times in **milliseconds** (lower is better).
+
+### Memory Cache
+
+| Test | YYMemoryCache | RECache | NSCache | Swift Dict | Dict + Lock |
+|------|:---:|:---:|:---:|:---:|:---:|
+| **set** (200k pairs) | 61.78 | **27.08** | 55.69 | 9.43 | 9.07 |
+| **set** (no resize) | 31.52 | **18.80** | 34.81 | 2.63 | 4.43 |
+| **get** (sequential) | 20.95 | **17.11** | 21.56 | 2.72 | 2.95 |
+| **get** (random) | 31.09 | 32.29 | 31.97 | 5.05 | 5.00 |
+| **get** (mixed hit/miss) | 28.49 | **27.86** | 24.93 | 6.32 | 6.68 |
+
+> Swift Dict / Dict + Lock are baselines without LRU, eviction, or thread safety overhead.
+
+### Disk Cache — Write
+
+| Test | YYDiskCache | RECache | RECache (file) | RECache (SQLite) |
+|------|:---:|:---:|:---:|:---:|
+| **set** NSNumber | 49.96 | **51.14** | 386.41 | 57.36 |
+| **set** Data (100KB) | 523.38 | **414.73** | 396.86 | 542.96 |
+| **replace** NSNumber | 75.20 | **74.62** | 173.06 | 70.53 |
+| **replace** Data (100KB) | 296.51 | **215.49** | 227.51 | 562.34 |
+
+### Disk Cache — Read
+
+| Test | YYDiskCache | RECache | RECache (file) | RECache (SQLite) |
+|------|:---:|:---:|:---:|:---:|
+| **get** NSNumber (random) | 28.66 | 37.55 | 154.20 | 31.28 |
+| **get** Data 100KB (random) | 289.61 | **247.95** | 252.30 | 519.32 |
+| **get** NSNumber (cached) | 32.48 | **32.09** | 148.06 | 36.59 |
+| **get** Data 100KB (cached) | 279.30 | **243.34** | 249.26 | 537.50 |
+| **get** none exist (small) | 2.00 | 1.95 | 1.95 | 1.98 |
+| **get** none exist (large) | 1.86 | **1.83** | 1.81 | 1.83 |
 
 ---
 

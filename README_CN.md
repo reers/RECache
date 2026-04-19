@@ -9,7 +9,7 @@
 
 ---
 
-RECache 是一个现代化的、泛型化的 **内存 + 磁盘** 两级键值缓存。最初从 [YYCache](https://github.com/ibireme/YYCache) 移植而来，但 **v2 放弃了 API 兼容性**，采用全面泛型 + `Codable` + `async/await` 的 Swift 原生设计。底层 SQLite + 文件系统存储引擎和 LRU 算法都原样保留 —— 只重写了接口层。
+RECache 是一个现代化的、泛型化的 **内存 + 磁盘** 两级键值缓存。最初从 [YYCache](https://github.com/ibireme/YYCache) 移植而来，采用全面泛型 + `Codable` + `async/await` 的 Swift 原生设计。底层 SQLite + 文件系统存储引擎和 LRU 算法都原样保留 —— 只重写了接口层。
 
 ---
 
@@ -232,6 +232,44 @@ struct ItemKey: Hashable, CustomStringConvertible {
 ```swift
 diskCache.fileNameProvider = { key in "item-\(key.userID)" }
 ```
+
+---
+
+## 📊 性能测试
+
+测试设备：**iPhone 15 Pro**，内存测试 200,000 条键值对，磁盘测试 1,000 条键值对。单位 **毫秒**（越低越好）。
+
+### 内存缓存
+
+| 测试项 | YYMemoryCache | RECache | NSCache | Swift Dict | Dict + Lock |
+|------|:---:|:---:|:---:|:---:|:---:|
+| **set**（20 万条） | 61.78 | **27.08** | 55.69 | 9.43 | 9.07 |
+| **set**（无扩容） | 31.52 | **18.80** | 34.81 | 2.63 | 4.43 |
+| **get**（顺序） | 20.95 | **17.11** | 21.56 | 2.72 | 2.95 |
+| **get**（随机） | 31.09 | 32.29 | 31.97 | 5.05 | 5.00 |
+| **get**（混合命中/未命中） | 28.49 | **27.86** | 24.93 | 6.32 | 6.68 |
+
+> Swift Dict / Dict + Lock 作为基准参考，不含 LRU、淘汰、线程安全开销。
+
+### 磁盘缓存 — 写入
+
+| 测试项 | YYDiskCache | RECache | RECache (file) | RECache (SQLite) |
+|------|:---:|:---:|:---:|:---:|
+| **set** NSNumber | 49.96 | **51.14** | 386.41 | 57.36 |
+| **set** Data (100KB) | 523.38 | **414.73** | 396.86 | 542.96 |
+| **replace** NSNumber | 75.20 | **74.62** | 173.06 | 70.53 |
+| **replace** Data (100KB) | 296.51 | **215.49** | 227.51 | 562.34 |
+
+### 磁盘缓存 — 读取
+
+| 测试项 | YYDiskCache | RECache | RECache (file) | RECache (SQLite) |
+|------|:---:|:---:|:---:|:---:|
+| **get** NSNumber（随机） | 28.66 | 37.55 | 154.20 | 31.28 |
+| **get** Data 100KB（随机） | 289.61 | **247.95** | 252.30 | 519.32 |
+| **get** NSNumber（缓存后） | 32.48 | **32.09** | 148.06 | 36.59 |
+| **get** Data 100KB（缓存后） | 279.30 | **243.34** | 249.26 | 537.50 |
+| **get** 不存在（小值） | 2.00 | 1.95 | 1.95 | 1.98 |
+| **get** 不存在（大值） | 1.86 | **1.83** | 1.81 | 1.83 |
 
 ---
 
