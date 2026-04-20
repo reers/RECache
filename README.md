@@ -9,7 +9,7 @@
 
 ---
 
-RECache is a modern, generic, **memory + disk** two-tier key-value cache for Swift. It was originally ported from [YYCache](https://github.com/ibireme/YYCache) and redesigned to embrace a fully generic, `Codable`-friendly, `async/await`-native Swift design. The SQLite + file-system storage engine and LRU algorithms that made YYCache fast are preserved verbatim — only the interface layer was rewritten.
+RECache is a modern, generic, **memory + disk** two-tier key-value cache for Swift. It was originally ported from [YYCache](https://github.com/ibireme/YYCache) and redesigned to embrace a fully generic, `Codable`-friendly, `async/await`-native Swift design. The SQLite + file-system storage engine and LRU algorithms that made YYCache fast are preserved verbatim — only the interface layer was rewritten. A few long-standing community fixes from stalled YYCache pull requests are also merged in: [`f874dd0`](https://github.com/reers/RECache/commit/f874dd07d8dbe5a8825bf4e08eeed9adb8fb4871) · [`ef9755b`](https://github.com/reers/RECache/commit/ef9755b093b8621503b13ab625507ce8731c9c8c) · [`c7efac0`](https://github.com/reers/RECache/commit/c7efac02fc6a24059d051808522fd4b194ef9101).
 
 ---
 

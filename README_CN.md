@@ -9,7 +9,7 @@
 
 ---
 
-RECache 是一个现代化的、泛型化的 **内存 + 磁盘** 两级键值缓存。最初从 [YYCache](https://github.com/ibireme/YYCache) 移植而来，采用全面泛型 + `Codable` + `async/await` 的 Swift 原生设计。底层 SQLite + 文件系统存储引擎和 LRU 算法都原样保留 —— 只重写了接口层。
+RECache 是一个现代化的、泛型化的 **内存 + 磁盘** 两级键值缓存。最初从 [YYCache](https://github.com/ibireme/YYCache) 移植而来，采用全面泛型 + `Codable` + `async/await` 的 Swift 原生设计。底层 SQLite + 文件系统存储引擎和 LRU 算法都原样保留 —— 只重写了接口层。另外合并了 YYCache 上游若干长期未合入的社区修复：[`f874dd0`](https://github.com/reers/RECache/commit/f874dd07d8dbe5a8825bf4e08eeed9adb8fb4871) · [`ef9755b`](https://github.com/reers/RECache/commit/ef9755b093b8621503b13ab625507ce8731c9c8c) · [`c7efac0`](https://github.com/reers/RECache/commit/c7efac02fc6a24059d051808522fd4b194ef9101)。
 
 ---
 
