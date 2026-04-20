@@ -204,3 +204,69 @@ extension Cache: CustomStringConvertible {
         return "<\(type(of: self)): \(id)> (\(name))"
     }
 }
+
+// MARK: - Auto Transformer
+//
+// Convenience initializers that pick a built-in ``Transformer`` based solely
+// on `Value`. Swift's overload resolution favours same-type constraints
+// (`Value == Data`, `Value == UIImage`) over protocol constraints
+// (`Value: Codable`), so `Cache<_, Data>(name:)` and `Cache<_, UIImage>(name:)`
+// unambiguously route to the dedicated factories even though `Data` itself is
+// `Codable`.
+//
+// Users with custom value types that are not `Data` / `Codable` / `UIImage`
+// (e.g. encrypted or compressed payloads) keep using the explicit
+// ``init(name:transformer:)`` / ``init(path:transformer:)`` escape hatch.
+
+extension Cache where Value == Data {
+    /// Creates a cache named `name` using ``Transformer/data()``.
+    public convenience init?(name: String) {
+        self.init(name: name, transformer: .data())
+    }
+    /// Creates a cache at `path` using ``Transformer/data()``.
+    public convenience init?(path: String) {
+        self.init(path: path, transformer: .data())
+    }
+}
+
+extension Cache where Value: Codable {
+    /// Creates a cache named `name` using ``Transformer/codable(format:)``.
+    ///
+    /// - Parameter format: Wire format. Default ``CodableFormat/json``.
+    public convenience init?(name: String, format: CodableFormat = .json) {
+        self.init(name: name, transformer: .codable(format: format))
+    }
+    /// Creates a cache at `path` using ``Transformer/codable(format:)``.
+    public convenience init?(path: String, format: CodableFormat = .json) {
+        self.init(path: path, transformer: .codable(format: format))
+    }
+}
+
+#if canImport(UIKit)
+import UIKit
+
+extension Cache where Value == UIImage {
+    /// Creates a cache named `name` using ``Transformer/image(jpegCompressionQuality:)``.
+    public convenience init?(name: String, jpegCompressionQuality: CGFloat = 1.0) {
+        self.init(name: name, transformer: .image(jpegCompressionQuality: jpegCompressionQuality))
+    }
+    /// Creates a cache at `path` using ``Transformer/image(jpegCompressionQuality:)``.
+    public convenience init?(path: String, jpegCompressionQuality: CGFloat = 1.0) {
+        self.init(path: path, transformer: .image(jpegCompressionQuality: jpegCompressionQuality))
+    }
+}
+#elseif canImport(AppKit)
+import AppKit
+
+@available(macOS 14.0, *)
+extension Cache where Value == NSImage {
+    /// Creates a cache named `name` using ``Transformer/image(jpegCompressionQuality:)``.
+    public convenience init?(name: String, jpegCompressionQuality: CGFloat = 1.0) {
+        self.init(name: name, transformer: .image(jpegCompressionQuality: jpegCompressionQuality))
+    }
+    /// Creates a cache at `path` using ``Transformer/image(jpegCompressionQuality:)``.
+    public convenience init?(path: String, jpegCompressionQuality: CGFloat = 1.0) {
+        self.init(path: path, transformer: .image(jpegCompressionQuality: jpegCompressionQuality))
+    }
+}
+#endif

@@ -35,6 +35,76 @@ struct CacheTests {
         #expect(cache != nil)
     }
 
+    // MARK: - Auto Transformer
+
+    /// Enumerate exactly one blob under `<cachePath>/data`. Requires the
+    /// surrounding ``DiskCache`` to be built with `inlineThreshold: 0` so
+    /// values never go through SQLite.
+    private static func onlyBlob(in cachePath: String) throws -> Data {
+        let dataDir = (cachePath as NSString).appendingPathComponent("data")
+        let files = try FileManager.default.contentsOfDirectory(atPath: dataDir)
+        #expect(files.count == 1)
+        let url = URL(fileURLWithPath: (dataDir as NSString).appendingPathComponent(files[0]))
+        return try Data(contentsOf: url)
+    }
+
+    /// `DiskCache<_, Data>(path:)` resolves to the identity
+    /// ``Transformer/data()`` — overload resolution prefers the same-type
+    /// constraint (`Value == Data`) over the `Value: Codable` overload.
+    /// Verified by reading the on-disk blob byte-for-byte.
+    @Test func autoInitPicksDataTransformer() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Data>(path: dir, inlineThreshold: 0)
+        try #require(cache != nil)
+
+        let bytes = Data([0x00, 0xFF, 0x10, 0x20, 0xAB])
+        try cache!.set(bytes, forKey: "k")
+
+        let blob = try Self.onlyBlob(in: dir)
+        #expect(blob == bytes)
+    }
+
+    /// `DiskCache<_, Codable>(path:)` resolves to ``Transformer/codable()``
+    /// with `.json` as the default format. Verified by decoding the raw blob.
+    @Test func autoInitPicksCodableTransformer() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Profile>(path: dir, inlineThreshold: 0)
+        try #require(cache != nil)
+
+        let value = Profile(id: 42, handle: "foo")
+        try cache!.set(value, forKey: "k")
+
+        let blob = try Self.onlyBlob(in: dir)
+        let decoded = try JSONDecoder().decode(Profile.self, from: blob)
+        #expect(decoded == value)
+    }
+
+    /// Passing `format:` on the Codable overload selects binary plist.
+    @Test func autoInitCodableBinaryPlist() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Profile>(path: dir, format: .binaryPlist, inlineThreshold: 0)
+        try #require(cache != nil)
+
+        let value = Profile(id: 7, handle: "plist")
+        try cache!.set(value, forKey: "k")
+
+        let blob = try Self.onlyBlob(in: dir)
+        let decoded = try PropertyListDecoder().decode(Profile.self, from: blob)
+        #expect(decoded == value)
+    }
+
+    /// End-to-end round-trip for the top-level ``Cache`` using the auto
+    /// initializer, confirming the Codable overload is selected and functional.
+    @Test func autoInitCacheRoundTripsCodable() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = Cache<String, Profile>(path: dir)
+        try #require(cache != nil)
+
+        let value = Profile(id: 99, handle: "auto")
+        try cache!.set(value, forKey: "k")
+        #expect(try cache!.value(forKey: "k") == value)
+    }
+
     @Test func initFailsOnEmptyPath() {
         let cache = Cache<String, Profile>(path: "", transformer: .codable())
         #expect(cache == nil)

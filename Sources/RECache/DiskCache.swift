@@ -692,3 +692,68 @@ extension DiskCache: CustomStringConvertible {
         }
     }
 }
+
+// MARK: - Auto Transformer
+//
+// Convenience initializers that pick a built-in ``Transformer`` based solely
+// on `Value`. See the companion note on ``Cache`` for the overload-resolution
+// rules — same-type constraints (`Value == Data`, `Value == UIImage`) take
+// precedence over the `Value: Codable` overload, so `DiskCache<_, Data>` and
+// `DiskCache<_, UIImage>` route to the dedicated factories unambiguously.
+
+extension DiskCache where Value == Data {
+    /// Creates a disk cache at `path` using ``Transformer/data()``.
+    public convenience init?(path: String, inlineThreshold: UInt = 20480) {
+        self.init(path: path, transformer: .data(), inlineThreshold: inlineThreshold)
+    }
+}
+
+extension DiskCache where Value: Codable {
+    /// Creates a disk cache at `path` using ``Transformer/codable(format:)``.
+    ///
+    /// - Parameter format: Wire format. Default ``CodableFormat/json``.
+    public convenience init?(
+        path: String,
+        format: CodableFormat = .json,
+        inlineThreshold: UInt = 20480
+    ) {
+        self.init(path: path, transformer: .codable(format: format), inlineThreshold: inlineThreshold)
+    }
+}
+
+#if canImport(UIKit)
+import UIKit
+
+extension DiskCache where Value == UIImage {
+    /// Creates a disk cache at `path` using ``Transformer/image(jpegCompressionQuality:)``.
+    public convenience init?(
+        path: String,
+        jpegCompressionQuality: CGFloat = 1.0,
+        inlineThreshold: UInt = 20480
+    ) {
+        self.init(
+            path: path,
+            transformer: .image(jpegCompressionQuality: jpegCompressionQuality),
+            inlineThreshold: inlineThreshold
+        )
+    }
+}
+#elseif canImport(AppKit)
+import AppKit
+
+@available(macOS 14.0, *)
+extension DiskCache where Value == NSImage {
+    /// Creates a disk cache at `path` using ``Transformer/image(jpegCompressionQuality:)``.
+    public convenience init?(
+        path: String,
+        jpegCompressionQuality: CGFloat = 1.0,
+        inlineThreshold: UInt = 20480
+    ) {
+        self.init(
+            path: path,
+            transformer: .image(jpegCompressionQuality: jpegCompressionQuality),
+            inlineThreshold: inlineThreshold
+        )
+    }
+}
+#endif
