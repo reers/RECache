@@ -55,10 +55,7 @@ struct Article: Codable, Sendable {
     let body: String
 }
 
-let cache = Cache<Int, Article>(
-    name: "articles",
-    transformer: .codable()
-)!
+let cache = Cache<Int, Article>(name: "articles")!
 
 // 同步
 try cache.set(article, forKey: 42)
@@ -77,10 +74,7 @@ cache.removeAll()
 ### 裸 `Data`（零编码开销）
 
 ```swift
-let blobs = DiskCache<String, Data>(
-    path: "/tmp/blobs",
-    transformer: .data()
-)!
+let blobs = DiskCache<String, Data>(path: "/tmp/blobs")!
 
 try blobs.set(Data(...), forKey: "thumbnail")
 let data = try blobs.value(forKey: "thumbnail")
@@ -90,21 +84,11 @@ let data = try blobs.value(forKey: "thumbnail")
 
 ```swift
 #if canImport(UIKit)
-let images = DiskCache<URL, UIImage>(
-    path: NSTemporaryDirectory() + "images",
-    transformer: .image()
-)!
+let images = DiskCache<URL, UIImage>(path: NSTemporaryDirectory() + "images")!
 #endif
 ```
 
-### 自定义 `Transformer`
-
-```swift
-let lz4: Transformer<MyModel> = Transformer(
-    encode: { try compress(JSONEncoder().encode($0)) },
-    decode: { try JSONDecoder().decode(MyModel.self, from: decompress($0)) }
-)
-```
+> 当 `Value` 是 `Codable`、`Data` 或 `UIImage`/`NSImage` 时，初始化器会 **自动选择** 内置 `Transformer`，无需手动指定。详见 [Transformer](#-transformer) 章节。
 
 ---
 
@@ -179,6 +163,30 @@ if let (value, meta) = try cache.diskCache.valueWithExtendedData(forKey: url) {
 ### 并发访问同一个 key
 
 多个并发任务读写同一个 key 是安全的 —— 操作被锁串行化。如果需要"多次读写之间原子"的语义，请在调用方自行加锁。
+
+---
+
+## 🔄 Transformer
+
+`DiskCache` 需要 `Transformer<Value>` 把值和 `Data` 互转。省略时库会根据 `Value` 类型自动选择：
+
+| `Value` 类型 | 自动选择的 Transformer | 备注 |
+|---|---|---|
+| 任何 `Codable` | `.codable()`（JSON） | 若负载 `Data` 字段多，可传 `format: .binaryPlist` |
+| `Data` | `.data()` | 零拷贝透传 |
+| `UIImage` / `NSImage` | `.image()` | 有 alpha 用 PNG，否则 JPEG |
+
+也可以显式传入自定义 `Transformer` —— 适用于压缩、加密等非标准场景：
+
+```swift
+let cache = Cache<String, MyModel>(
+    name: "compressed",
+    transformer: Transformer(
+        encode: { try compress(JSONEncoder().encode($0)) },
+        decode: { try JSONDecoder().decode(MyModel.self, from: decompress($0)) }
+    )
+)!
+```
 
 ---
 

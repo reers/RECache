@@ -55,10 +55,7 @@ struct Article: Codable, Sendable {
     let body: String
 }
 
-let cache = Cache<Int, Article>(
-    name: "articles",
-    transformer: .codable()
-)!
+let cache = Cache<Int, Article>(name: "articles")!
 
 // Sync
 try cache.set(article, forKey: 42)
@@ -77,10 +74,7 @@ cache.removeAll()
 ### Raw `Data` (no encoding overhead)
 
 ```swift
-let blobs = DiskCache<String, Data>(
-    path: "/tmp/blobs",
-    transformer: .data()
-)!
+let blobs = DiskCache<String, Data>(path: "/tmp/blobs")!
 
 try blobs.set(Data(...), forKey: "thumbnail")
 let data = try blobs.value(forKey: "thumbnail")
@@ -90,21 +84,11 @@ let data = try blobs.value(forKey: "thumbnail")
 
 ```swift
 #if canImport(UIKit)
-let images = DiskCache<URL, UIImage>(
-    path: NSTemporaryDirectory() + "images",
-    transformer: .image()
-)!
+let images = DiskCache<URL, UIImage>(path: NSTemporaryDirectory() + "images")!
 #endif
 ```
 
-### Custom `Transformer`
-
-```swift
-let lz4: Transformer<MyModel> = Transformer(
-    encode: { try compress(JSONEncoder().encode($0)) },
-    decode: { try JSONDecoder().decode(MyModel.self, from: decompress($0)) }
-)
-```
+> When `Value` is `Codable`, `Data`, or `UIImage`/`NSImage`, the initializer **automatically picks** the matching built-in `Transformer` — no need to specify one. See [Transformer](#-transformer) for details and customization.
 
 ---
 
@@ -179,6 +163,30 @@ if let (value, meta) = try cache.diskCache.valueWithExtendedData(forKey: url) {
 ### Concurrent key access
 
 Reading and writing the same key from multiple concurrent tasks is safe — operations are serialized by the lock. If you need to make multiple reads / writes atomic with respect to each other, protect them at the call site.
+
+---
+
+## 🔄 Transformer
+
+`DiskCache` needs a `Transformer<Value>` to convert values to/from `Data`. When you omit it from the initializer, the library auto-selects one based on `Value`:
+
+| `Value` type | Auto-selected transformer | Notes |
+|---|---|---|
+| Any `Codable` | `.codable()` (JSON) | Pass `format: .binaryPlist` if your payload is `Data`-heavy |
+| `Data` | `.data()` | Zero-copy pass-through |
+| `UIImage` / `NSImage` | `.image()` | PNG for alpha, JPEG otherwise |
+
+You can always pass a `Transformer` explicitly — useful for compressed, encrypted, or otherwise non-standard payloads:
+
+```swift
+let cache = Cache<String, MyModel>(
+    name: "compressed",
+    transformer: Transformer(
+        encode: { try compress(JSONEncoder().encode($0)) },
+        decode: { try JSONDecoder().decode(MyModel.self, from: decompress($0)) }
+    )
+)!
+```
 
 ---
 
