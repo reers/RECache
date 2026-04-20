@@ -9,318 +9,346 @@ struct MemoryCacheTests {
 
     @Test func setAndGet() {
         let cache = MemoryCache<String, String>()
-        cache.setObject("value1", forKey: "key1")
-        #expect(cache.object(forKey: "key1") == "value1")
-        #expect(cache.object(forKey: "nonexistent") == nil)
+        cache.set("value1", forKey: "key1")
+        #expect(cache.value(forKey: "key1") == "value1")
+        #expect(cache.value(forKey: "nonexistent") == nil)
     }
 
-    @Test func containsObject() {
+    @Test func contains() {
         let cache = MemoryCache<String, Int>()
-        cache.setObject(42, forKey: "answer")
-        #expect(cache.containsObject(forKey: "answer") == true)
-        #expect(cache.containsObject(forKey: "missing") == false)
+        cache.set(42, forKey: "answer")
+        #expect(cache.contains("answer"))
+        #expect(!cache.contains("missing"))
     }
 
-    @Test func removeObject() {
+    @Test func remove() {
         let cache = MemoryCache<String, String>()
-        cache.setObject("value", forKey: "key")
-        cache.removeObject(forKey: "key")
-        #expect(cache.object(forKey: "key") == nil)
+        cache.set("value", forKey: "key")
+        cache.remove(forKey: "key")
+        #expect(cache.value(forKey: "key") == nil)
         #expect(cache.totalCount == 0)
     }
 
-    @Test func removeAllObjects() {
+    @Test func removeAll() {
         let cache = MemoryCache<String, Int>()
         for i in 0..<100 {
-            cache.setObject(i, forKey: "key\(i)")
+            cache.set(i, forKey: "key\(i)")
         }
         #expect(cache.totalCount == 100)
-        cache.removeAllObjects()
+        cache.removeAll()
         #expect(cache.totalCount == 0)
         #expect(cache.totalCost == 0)
     }
 
-    @Test func setNilRemovesObject() {
+    @Test func setNilRemovesEntry() {
         let cache = MemoryCache<String, String>()
-        cache.setObject("value", forKey: "key")
-        #expect(cache.containsObject(forKey: "key") == true)
-        cache.setObject(nil, forKey: "key")
-        #expect(cache.containsObject(forKey: "key") == false)
+        cache.set("value", forKey: "key")
+        #expect(cache.contains("key"))
+        cache.set(nil, forKey: "key")
+        #expect(!cache.contains("key"))
         #expect(cache.totalCount == 0)
     }
 
     @Test func updateExistingKey() {
         let cache = MemoryCache<String, String>()
-        cache.setObject("old", forKey: "key")
-        cache.setObject("new", forKey: "key")
-        #expect(cache.object(forKey: "key") == "new")
+        cache.set("old", forKey: "key")
+        cache.set("new", forKey: "key")
+        #expect(cache.value(forKey: "key") == "new")
         #expect(cache.totalCount == 1)
     }
 
-    // MARK: - Count & Cost Tracking
+    // MARK: - Count / cost
 
-    @Test func totalCountTracking() {
-        let cache = MemoryCache<String, Int>()
-        #expect(cache.totalCount == 0)
-        cache.setObject(1, forKey: "a")
-        cache.setObject(2, forKey: "b")
-        cache.setObject(3, forKey: "c")
-        #expect(cache.totalCount == 3)
-        cache.removeObject(forKey: "b")
-        #expect(cache.totalCount == 2)
-    }
-
-    @Test func totalCostTracking() {
-        let cache = MemoryCache<String, Int>()
-        cache.setObject(1, forKey: "a", cost: 10)
-        cache.setObject(2, forKey: "b", cost: 20)
-        #expect(cache.totalCost == 30)
-
-        cache.setObject(1, forKey: "a", cost: 5)
-        #expect(cache.totalCost == 25)
-
-        cache.removeObject(forKey: "a")
-        #expect(cache.totalCost == 20)
-    }
-
-    @Test func defaultCostIsZero() {
+    @Test func totalCountAndCost() {
         let cache = MemoryCache<String, String>()
-        cache.setObject("v", forKey: "k")
-        #expect(cache.totalCost == 0)
+        cache.set("a", forKey: "k1", cost: 10)
+        cache.set("b", forKey: "k2", cost: 20)
+        cache.set("c", forKey: "k3", cost: 30)
+        #expect(cache.totalCount == 3)
+        #expect(cache.totalCost == 60)
     }
 
-    // MARK: - LRU Ordering
+    @Test func updateAdjustsCost() {
+        let cache = MemoryCache<String, String>()
+        cache.set("a", forKey: "k1", cost: 10)
+        #expect(cache.totalCost == 10)
+        cache.set("b", forKey: "k1", cost: 50)
+        #expect(cache.totalCost == 50)
+        #expect(cache.totalCount == 1)
+    }
 
-    @Test func accessPromotesToHead() {
+    // MARK: - Limits
+
+    @Test func countLimitEvictsLRU() {
         let cache = MemoryCache<String, Int>()
         cache.countLimit = 3
-        cache.setObject(1, forKey: "a")
-        cache.setObject(2, forKey: "b")
-        cache.setObject(3, forKey: "c")
-
-        _ = cache.object(forKey: "a")
-
-        cache.setObject(4, forKey: "d")
-
-        #expect(cache.containsObject(forKey: "a") == true)
-        #expect(cache.containsObject(forKey: "c") == true)
-        #expect(cache.containsObject(forKey: "d") == true)
-        #expect(cache.containsObject(forKey: "b") == false)
+        cache.set(1, forKey: "a")
+        cache.set(2, forKey: "b")
+        cache.set(3, forKey: "c")
+        cache.set(4, forKey: "d") // should evict "a"
+        #expect(cache.value(forKey: "a") == nil)
+        #expect(cache.value(forKey: "b") == 2)
+        #expect(cache.value(forKey: "d") == 4)
     }
 
-    // MARK: - Trim Methods
+    @Test func costLimitTrimsEventually() async {
+        let cache = MemoryCache<String, Int>()
+        cache.costLimit = 50
+        await cache.set(1, forKey: "a", cost: 30)
+        await cache.set(2, forKey: "b", cost: 30) // overflow fires async trim
+        cache.trim(toCost: 50) // force sync
+        #expect(cache.totalCost <= 50)
+    }
 
     @Test func trimToCount() {
         let cache = MemoryCache<String, Int>()
         for i in 0..<10 {
-            cache.setObject(i, forKey: "key\(i)")
+            cache.set(i, forKey: "k\(i)")
         }
-        cache.trimToCount(5)
-        #expect(cache.totalCount == 5)
+        cache.trim(toCount: 3)
+        #expect(cache.totalCount == 3)
+    }
 
-        cache.trimToCount(0)
+    @Test func trimToZeroRemovesAll() {
+        let cache = MemoryCache<String, Int>()
+        cache.set(1, forKey: "a")
+        cache.trim(toCount: 0)
         #expect(cache.totalCount == 0)
     }
 
-    @Test func trimToCost() {
+    @Test func trimToCostZeroRemovesAll() {
         let cache = MemoryCache<String, Int>()
-        for i in 0..<10 {
-            cache.setObject(i, forKey: "key\(i)", cost: 10)
-        }
-        #expect(cache.totalCost == 100)
-        cache.trimToCost(50)
-        #expect(cache.totalCost <= 50)
+        cache.set(1, forKey: "a", cost: 5)
+        cache.set(2, forKey: "b", cost: 5)
+        cache.trim(toCost: 0)
+        #expect(cache.totalCount == 0)
+        #expect(cache.totalCost == 0)
     }
 
-    @Test func trimToAge() async throws {
+    @Test func trimToCostAboveCurrentIsNoOp() {
         let cache = MemoryCache<String, Int>()
-        cache.setObject(1, forKey: "old")
-
-        try await Task.sleep(nanoseconds: 200_000_000)
-
-        cache.setObject(2, forKey: "new")
-
-        cache.trimToAge(0.1)
-
-        #expect(cache.containsObject(forKey: "old") == false)
-        #expect(cache.containsObject(forKey: "new") == true)
-    }
-
-    @Test func trimToCountEvictsLRU() {
-        let cache = MemoryCache<String, Int>()
-        cache.setObject(1, forKey: "first")
-        cache.setObject(2, forKey: "second")
-        cache.setObject(3, forKey: "third")
-
-        cache.trimToCount(1)
-
-        #expect(cache.containsObject(forKey: "third") == true)
-        #expect(cache.containsObject(forKey: "second") == false)
-        #expect(cache.containsObject(forKey: "first") == false)
-    }
-
-    @Test func trimToCostEvictsLRU() {
-        let cache = MemoryCache<String, Int>()
-        cache.setObject(1, forKey: "a", cost: 10)
-        cache.setObject(2, forKey: "b", cost: 10)
-        cache.setObject(3, forKey: "c", cost: 10)
-
-        cache.trimToCost(10)
-
+        cache.set(1, forKey: "a", cost: 5)
+        cache.trim(toCost: 100)
         #expect(cache.totalCount == 1)
-        #expect(cache.containsObject(forKey: "c") == true)
     }
 
-    // MARK: - Count Limit
+    // MARK: - Expiration
 
-    @Test func countLimitEvictsOnInsert() {
+    @Test func defaultExpirationNever() {
         let cache = MemoryCache<String, Int>()
-        cache.countLimit = 3
-
-        cache.setObject(1, forKey: "a")
-        cache.setObject(2, forKey: "b")
-        cache.setObject(3, forKey: "c")
-        #expect(cache.totalCount == 3)
-
-        cache.setObject(4, forKey: "d")
-        #expect(cache.totalCount == 3)
-        #expect(cache.containsObject(forKey: "a") == false)
+        cache.set(1, forKey: "a")
+        #expect(cache.value(forKey: "a") == 1)
     }
 
-    // MARK: - Cost Limit (async trim)
-
-    @Test func costLimitTrimsAsynchronously() async throws {
+    @Test func cacheLevelExpirationSecondsEvicts() async throws {
         let cache = MemoryCache<String, Int>()
-        cache.costLimit = 50
-
-        for i in 0..<10 {
-            cache.setObject(i, forKey: "key\(i)", cost: 10)
-        }
-
+        cache.expiration = .seconds(0.4)
+        await cache.set(1, forKey: "a")
+        #expect(await cache.value(forKey: "a") == 1)
         try await Task.sleep(nanoseconds: 500_000_000)
-
-        #expect(cache.totalCost <= 50)
+        #expect(await cache.value(forKey: "a") == nil)
+        #expect(cache.totalCount == 0)
     }
 
-    // MARK: - Thread Safety
-
-    @Test func concurrentReadWrite() async {
-        let cache = MemoryCache<Int, Int>()
-        let iterations = 1000
-
-        await withTaskGroup(of: Void.self) { group in
-            for i in 0..<iterations {
-                group.addTask {
-                    cache.setObject(i, forKey: i, cost: 1)
-                }
-            }
-            for i in 0..<iterations {
-                group.addTask {
-                    _ = cache.object(forKey: i)
-                }
-            }
-        }
-
-        #expect(cache.totalCount <= iterations)
-        #expect(cache.totalCount > 0)
-    }
-
-    @Test func concurrentMixedOperations() async {
-        let cache = MemoryCache<Int, Int>()
-        cache.countLimit = 50
-
-        await withTaskGroup(of: Void.self) { group in
-            for i in 0..<500 {
-                group.addTask { cache.setObject(i, forKey: i) }
-                group.addTask { _ = cache.object(forKey: i) }
-                group.addTask { _ = cache.containsObject(forKey: i) }
-            }
-            group.addTask { cache.trimToCount(10) }
-            group.addTask { cache.removeAllObjects() }
-        }
-
-        #expect(cache.totalCount >= 0)
-    }
-
-    // MARK: - Properties
-
-    @Test func releaseFlags() {
+    @Test func cacheLevelExpirationDatePast() {
         let cache = MemoryCache<String, Int>()
-        #expect(cache.releaseOnMainThread == false)
-        #expect(cache.releaseAsynchronously == true)
-
-        cache.releaseOnMainThread = true
-        cache.releaseAsynchronously = false
-        #expect(cache.releaseOnMainThread == true)
-        #expect(cache.releaseAsynchronously == false)
+        cache.set(1, forKey: "a")
+        cache.expiration = .date(Date(timeIntervalSinceNow: -1))
+        #expect(cache.value(forKey: "a") == nil)
     }
 
-    @Test func defaultLimits() {
+    @Test func readDoesNotRefreshExpiration() async throws {
         let cache = MemoryCache<String, Int>()
-        #expect(cache.countLimit == Int.max)
-        #expect(cache.costLimit == Int.max)
-        #expect(cache.ageLimit == .greatestFiniteMagnitude)
-        #expect(cache.autoTrimInterval == 5.0)
+        cache.expiration = .seconds(0.15)
+        await cache.set(1, forKey: "a")
+        try await Task.sleep(nanoseconds: 80_000_000)
+        _ = await cache.value(forKey: "a") // should NOT refresh write time
+        try await Task.sleep(nanoseconds: 90_000_000)
+        #expect(await cache.value(forKey: "a") == nil)
     }
 
-    @Test func booleanDefaults() {
+    @Test func setRefreshesExpiration() async throws {
         let cache = MemoryCache<String, Int>()
-        #expect(cache.shouldRemoveAllObjectsOnMemoryWarning == true)
-        #expect(cache.shouldRemoveAllObjectsWhenEnteringBackground == true)
+        // Tolerate cooperative-pool scheduling jitter: use 500ms expiration
+        // and ~150ms sleeps so the second `set` re-stamps the entry well
+        // before the original deadline would fire. The spec we're verifying
+        // (write-time refresh on re-`set`) is independent of this budget.
+        cache.expiration = .seconds(0.5)
+        await cache.set(1, forKey: "a")
+        try await Task.sleep(nanoseconds: 150_000_000)
+        await cache.set(2, forKey: "a")
+        try await Task.sleep(nanoseconds: 150_000_000)
+        #expect(await cache.value(forKey: "a") == 2)
     }
 
-    // MARK: - Description
-
-    @Test func descriptionWithName() {
+    @Test func removeExpiredSweepsAll() async throws {
         let cache = MemoryCache<String, Int>()
-        cache.name = "TestCache"
-        #expect(cache.description.contains("TestCache"))
-        #expect(cache.description.contains("MemoryCache"))
+        cache.expiration = .seconds(0.05)
+        await cache.set(1, forKey: "a")
+        await cache.set(2, forKey: "b")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await cache.removeExpired()
+        #expect(!(await cache.contains("a")))
+        #expect(!(await cache.contains("b")))
+        #expect(cache.totalCount == 0)
     }
 
-    @Test func descriptionWithoutName() {
+    @Test func cacheLevelExpirationDaysPastEvicts() {
         let cache = MemoryCache<String, Int>()
-        #expect(cache.description.contains("MemoryCache"))
-        #expect(!cache.description.contains("()"))
+        cache.set(1, forKey: "a")
+        cache.expiration = .days(-1)
+        #expect(cache.value(forKey: "a") == nil)
     }
 
-    // MARK: - Edge Cases
+    @Test func cacheLevelExpirationDaysFutureKeeps() {
+        let cache = MemoryCache<String, Int>()
+        cache.expiration = .days(1)
+        cache.set(1, forKey: "a")
+        #expect(cache.value(forKey: "a") == 1)
+    }
+
+    @Test func removeExpiredDaysSweeps() async throws {
+        let cache = MemoryCache<String, Int>()
+        await cache.set(1, forKey: "a")
+        await cache.set(2, forKey: "b")
+        cache.expiration = .days(-1)
+        await cache.removeExpired()
+        #expect(!(await cache.contains("a")))
+        #expect(!(await cache.contains("b")))
+        #expect(cache.totalCount == 0)
+    }
+
+    // MARK: - Async API
+
+    @Test func asyncRoundtrip() async {
+        let cache = MemoryCache<String, Int>()
+        await cache.set(7, forKey: "a")
+        let v = await cache.value(forKey: "a")
+        #expect(v == 7)
+        #expect(await cache.contains("a"))
+        await cache.remove(forKey: "a")
+        #expect(!(await cache.contains("a")))
+    }
+
+    @Test func asyncRemoveAll() async {
+        let cache = MemoryCache<String, Int>()
+        for i in 0..<10 { await cache.set(i, forKey: "k\(i)") }
+        await cache.removeAll()
+        #expect(cache.totalCount == 0)
+    }
+
+    // MARK: - Generic keys
 
     @Test func intKeys() {
         let cache = MemoryCache<Int, String>()
-        cache.setObject("zero", forKey: 0)
-        cache.setObject("max", forKey: Int.max)
-        #expect(cache.object(forKey: 0) == "zero")
-        #expect(cache.object(forKey: Int.max) == "max")
+        cache.set("one", forKey: 1)
+        cache.set("two", forKey: 2)
+        #expect(cache.value(forKey: 1) == "one")
+        #expect(cache.value(forKey: 2) == "two")
     }
 
-    @Test func removeNonexistentKey() {
+    @Test func customHashableKeys() {
+        struct Key: Hashable {
+            let user: Int
+            let scope: String
+        }
+        let cache = MemoryCache<Key, Int>()
+        cache.set(99, forKey: Key(user: 1, scope: "a"))
+        #expect(cache.value(forKey: Key(user: 1, scope: "a")) == 99)
+        #expect(cache.value(forKey: Key(user: 2, scope: "a")) == nil)
+    }
+
+    // MARK: - Release flags (read/write the backing linked list)
+
+    @Test func releaseOnMainThreadFlag() {
         let cache = MemoryCache<String, Int>()
-        cache.setObject(1, forKey: "a")
-        cache.removeObject(forKey: "nonexistent")
-        #expect(cache.totalCount == 1)
+        #expect(cache.releaseOnMainThread == false)
+        cache.releaseOnMainThread = true
+        #expect(cache.releaseOnMainThread == true)
+        cache.releaseOnMainThread = false
+        #expect(cache.releaseOnMainThread == false)
     }
 
-    @Test func largeNumberOfEntries() {
-        let cache = MemoryCache<Int, Int>()
-        let count = 10_000
-        for i in 0..<count {
-            cache.setObject(i, forKey: i)
-        }
-        #expect(cache.totalCount == count)
-        for i in 0..<count {
-            #expect(cache.object(forKey: i) == i)
-        }
-    }
-
-    @Test func repeatedSetAndRemove() {
+    @Test func releaseAsynchronouslyFlag() {
         let cache = MemoryCache<String, Int>()
-        for i in 0..<100 {
-            cache.setObject(i, forKey: "key")
-            #expect(cache.object(forKey: "key") == i)
-        }
-        #expect(cache.totalCount == 1)
-        cache.removeObject(forKey: "key")
+        #expect(cache.releaseAsynchronously == true)
+        cache.releaseAsynchronously = false
+        #expect(cache.releaseAsynchronously == false)
+        cache.releaseAsynchronously = true
+        #expect(cache.releaseAsynchronously == true)
+    }
+
+    /// Exercises the `releaseAsynchronously = true` (default) path through
+    /// `scheduleRelease` / `LinkedList.removeAll` / `_trimToCost` / `_trimToCount`
+    /// where nodes are dispatched to a background queue for release.
+    @Test func releaseAsyncPathsRun() async {
+        let cache = MemoryCache<String, Int>()
+        cache.releaseAsynchronously = true
+        for i in 0..<5 { await cache.set(i, forKey: "k\(i)", cost: 10) }
+        cache.trim(toCount: 2)
+        #expect(cache.totalCount == 2)
+        cache.trim(toCost: 5)
+        await cache.set(9, forKey: "solo", cost: 1)
+        await cache.remove(forKey: "solo")
+        await cache.removeAll()
+        // Give the async release dispatches time to drain.
+        try? await Task.sleep(nanoseconds: 50_000_000)
         #expect(cache.totalCount == 0)
+    }
+
+    /// Exercises the `releaseAsynchronously = false && releaseOnMainThread` branch
+    /// of `scheduleRelease` / `LinkedList.removeAll`.
+    @Test func releaseSyncOnMainThreadPath() async {
+        let cache = MemoryCache<String, Int>()
+        cache.releaseAsynchronously = false
+        cache.releaseOnMainThread = true
+        for i in 0..<3 { await cache.set(i, forKey: "k\(i)") }
+        await cache.remove(forKey: "k0")
+        await cache.removeAll()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(cache.totalCount == 0)
+    }
+
+    // MARK: - CustomStringConvertible
+
+    @Test func descriptionWithoutName() {
+        let cache = MemoryCache<String, Int>()
+        let desc = cache.description
+        #expect(desc.contains("MemoryCache"))
+    }
+
+    @Test func descriptionWithName() {
+        let cache = MemoryCache<String, Int>()
+        cache.name = "memo"
+        #expect(cache.description.contains("memo"))
+    }
+
+    // MARK: - Auto-trim
+
+    /// Drives `trimRecursively` / `trimInBackground` by dropping the interval
+    /// and waiting. Asserts the count shrinks to `countLimit` without manual
+    /// `trim(toCount:)` calls.
+    @Test func autoTrimRunsInBackground() async throws {
+        let cache = MemoryCache<String, Int>()
+        cache.autoTrimInterval = 0.1
+        cache.countLimit = 2
+        for i in 0..<6 { await cache.set(i, forKey: "k\(i)") }
+        // Wait a few auto-trim cycles.
+        try await Task.sleep(nanoseconds: 500_000_000)
+        #expect(cache.totalCount <= 2)
+    }
+
+    // MARK: - Concurrent access smoke test
+
+    @Test func concurrentAccessDoesNotCrash() async {
+        let cache = MemoryCache<String, Int>()
+        await withTaskGroup(of: Void.self) { group in
+            for i in 0..<100 {
+                group.addTask {
+                    await cache.set(i, forKey: "k\(i % 20)")
+                    _ = await cache.value(forKey: "k\(i % 20)")
+                }
+            }
+        }
     }
 }

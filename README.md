@@ -1,7 +1,7 @@
 # RECache
 
 [![Swift](https://img.shields.io/badge/Swift-6.0-orange.svg)](https://swift.org)
-[![Platforms](https://img.shields.io/badge/Platforms-iOS%2013%2B%20%7C%20tvOS%2013%2B-blue.svg)](https://developer.apple.com/swift/)
+[![Platforms](https://img.shields.io/badge/Platforms-iOS%2013%2B%20%7C%20tvOS%2013%2B%20%7C%20macOS%2011%2B%20%7C%20visionOS%201%2B-blue.svg)](https://developer.apple.com/swift/)
 [![SPM](https://img.shields.io/badge/SPM-compatible-brightgreen.svg)](https://swift.org/package-manager/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -9,22 +9,22 @@
 
 ---
 
-RECache is a strict Swift port of [YYCache](https://github.com/ibireme/YYCache). It preserves 1:1 API semantics and behavior of the original library while adapting to Swift 6's strict concurrency model.
-
-It is designed for high-performance **memory + disk** two-tier key-value caching on iOS / tvOS (images, JSON payloads, archived objects, etc.).
+RECache is a modern, generic, **memory + disk** two-tier key-value cache for Swift. It was originally ported from [YYCache](https://github.com/ibireme/YYCache) and redesigned to embrace a fully generic, `Codable`-friendly, `async/await`-native Swift design. The SQLite + file-system storage engine and LRU algorithms that made YYCache fast are preserved verbatim — only the interface layer was rewritten.
 
 ---
 
 ## ✨ Features
 
-- **Two-tier architecture** — a fast LRU doubly-linked-list memory layer on top of a SQLite + file-system disk layer that automatically picks the best storage medium per value
-- **LRU eviction** — automatic trimming along four axes: count, cost, age, and free-disk-space
-- **Smart storage selection** — values smaller than `inlineThreshold` (default 20KB) are stored as SQLite blobs; larger values are written as standalone files, balancing read and write performance
-- **Sync & async APIs** — every access method ships with both a blocking variant and a background-queue block variant
-- **System event handling** — automatic response to memory warnings, backgrounding, and app termination notifications
-- **Swift 6 concurrency ready** — all public types satisfy `Sendable`; every `@unchecked Sendable` carries an explicit safety invariant and a documented evolution plan
-- **Automatic trimming** — built-in background timer periodically enforces all configured limits
-- **Extended metadata** — each cached object can carry auxiliary `extendedData` (e.g. image decoding info)
+- **Full generics** — `MemoryCache<Key, Value>`, `DiskCache<Key, Value>`, `Cache<Key, Value>` with `Key: Hashable & Sendable`, `Value: Sendable`
+- **`Transformer<Value>` serialization** — built-in factories for `Data`, `Codable` (JSON / binary plist), and `UIImage` / `NSImage`; or bring your own
+- **Cache-level `Expiration`** — `.never`, `.seconds(_:)`, `.date(_:)`, evaluated at read time against each entry's write time
+- **Two-tier architecture** — a lock-free(ish) LRU linked-list memory layer on top of a SQLite + file-system disk layer that automatically picks the best storage medium per value
+- **LRU eviction** — automatic trimming by count, cost, expiration, and free-disk-space
+- **Smart storage selection** — values smaller than `inlineThreshold` (default 20KB) live as SQLite blobs; larger values spill to standalone files
+- **Sync **and** `async`/`await` APIs** — every access method has a matching `asyncXxx` variant that dispatches off your thread
+- **`extendedData`** — attach opaque metadata (ETag, source URL, decoding hints) to any cached entry without it affecting the `Transformer`
+- **System event handling** — automatic response to memory warnings, backgrounding, and app termination
+- **Swift 6 concurrency ready** — all public types are `Sendable`; every `@unchecked Sendable` carries a documented safety invariant
 
 ---
 
@@ -32,193 +32,257 @@ It is designed for high-performance **memory + disk** two-tier key-value caching
 
 ### Swift Package Manager
 
-Add the dependency to your `Package.swift`:
-
 ```swift
 dependencies: [
-    .package(url: "https://github.com/reers/RECache.git", from: "0.1.0")
+    .package(url: "https://github.com/reers/RECache.git", from: "2.0.0")
 ]
 ```
 
-Then add `RECache` to the `dependencies` list of your target.
-
-Or in Xcode: `File > Add Package Dependencies...` and enter `https://github.com/reers/RECache.git`.
+Then add `RECache` to your target's dependencies.
 
 ---
 
 ## 🚀 Quick Start
 
-### Top-level `Cache` (memory + disk)
-
-The most common entry point — internally coordinates `MemoryCache` and `DiskCache`:
+### A two-tier cache of `Codable` values
 
 ```swift
 import RECache
 
-guard let cache = Cache(name: "ImageCache") else { return }
-
-cache.setObject("Hello, World!" as NSString, forKey: "greeting")
-
-if let value = cache.object(forKey: "greeting") as? NSString {
-    print(value)
+struct Article: Codable, Sendable {
+    let id: Int
+    let title: String
+    let body: String
 }
 
-cache.object(forKey: "greeting") { key, object in
-    print("async get \(key) -> \(object ?? "")")
-}
+let cache = Cache<Int, Article>(
+    name: "articles",
+    transformer: .codable()
+)!
 
-cache.removeObject(forKey: "greeting")
-cache.removeAllObjects()
+// Sync
+try cache.set(article, forKey: 42)
+let fetched = try cache.value(forKey: 42)   // memory first, disk fallback
+
+// Async — same names, just add `await`. Sync versions are marked
+// `@available(*, noasync)`, so calling them from an async context
+// warns (or errors under Swift 6 strict concurrency).
+try await cache.set(article, forKey: 42)
+let fetched2 = try await cache.value(forKey: 42)
+
+cache.remove(forKey: 42)
+cache.removeAll()
 ```
 
-### `MemoryCache` only
-
-A generic cache where `Key: Hashable & Sendable` and `Value: Sendable`:
+### Raw `Data` (no encoding overhead)
 
 ```swift
-let memCache = MemoryCache<String, UIImage>()
-memCache.countLimit = 100
-memCache.costLimit = 50 * 1024 * 1024
-memCache.ageLimit = 300
+let blobs = DiskCache<String, Data>(
+    path: "/tmp/blobs",
+    transformer: .data()
+)!
 
-memCache.setObject(image, forKey: "avatar", cost: image.diskByteCount)
-
-if let cached = memCache.object(forKey: "avatar") {
-    imageView.image = cached
-}
+try blobs.set(Data(...), forKey: "thumbnail")
+let data = try blobs.value(forKey: "thumbnail")
 ```
 
-### `DiskCache` only
+### Images
 
 ```swift
-let path = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true)[0]
-    + "/MyDiskCache"
-
-guard let diskCache = DiskCache.shared(path: path) else { return }
-
-diskCache.countLimit = 10_000
-diskCache.costLimit = 500 * 1024 * 1024
-diskCache.freeDiskSpaceLimit = 100 * 1024 * 1024
-
-diskCache.setObject(largeData as NSData, forKey: "payload") {
-    print("saved to disk")
-}
+#if canImport(UIKit)
+let images = DiskCache<URL, UIImage>(
+    path: NSTemporaryDirectory() + "images",
+    transformer: .image()
+)!
+#endif
 ```
 
-### Custom archiving & filenames
-
-For types that don't conform to `NSCoding`, plug in your own archive / unarchive closures:
+### Custom `Transformer`
 
 ```swift
-diskCache.customArchiveBlock = { object in
-    try? JSONEncoder().encode(object as? MyCodable)
+let lz4: Transformer<MyModel> = Transformer(
+    encode: { try compress(JSONEncoder().encode($0)) },
+    decode: { try JSONDecoder().decode(MyModel.self, from: decompress($0)) }
+)
+```
+
+---
+
+## ⏳ Expiration
+
+```swift
+// Configured per layer — memory and disk have independent policies.
+cache.memoryCache.expiration = .seconds(300)
+cache.diskCache.expiration = .seconds(60 * 60 * 24)
+
+// Or with an absolute deadline.
+cache.memoryCache.expiration = .date(futureDate)
+
+// Manual sweep
+cache.memoryCache.removeExpired()
+cache.diskCache.removeExpired()
+```
+
+Semantics: expiration is measured from each entry's **write time**. Reading an entry moves it to the head of the LRU list but does **not** refresh the write time. `set` always refreshes. Expired entries are treated as misses and removed lazily on access; the disk layer tracks write time at second-level precision.
+
+---
+
+## 🧊 LRU limits
+
+```swift
+cache.memoryCache.countLimit = 500        // max number of entries
+cache.memoryCache.costLimit = 50 * 1024 * 1024  // max total "cost" units
+
+cache.diskCache.countLimit = 10_000
+cache.diskCache.costLimit = 500 * 1024 * 1024   // max bytes on disk
+cache.diskCache.freeDiskSpaceLimit = 100 * 1024 * 1024  // trim when disk free < 100MB
+
+// Manual trim
+cache.memoryCache.trim(toCount: 100)
+cache.diskCache.trim(toCost: 50 * 1024 * 1024)
+```
+
+The background auto-trim timer runs every `autoTrimInterval` seconds (`5` for memory, `60` for disk by default).
+
+---
+
+## 🏷 Extended data
+
+`extendedData` is opaque `Data` persisted **alongside** a cached value but **outside** the `Transformer` — useful for things like HTTP `ETag`, decode hints, or cache provenance that you don't want inside your `Codable` struct.
+
+```swift
+try cache.set(
+    image,
+    forKey: url,
+    extendedData: "etag=abc123".data(using: .utf8)
+)
+
+if let meta = cache.extendedData(forKey: url) {
+    // ...
 }
-diskCache.customUnarchiveBlock = { data in
-    try? JSONDecoder().decode(MyCodable.self, from: data)
+
+// Fetch both in one round-trip
+if let (value, meta) = try cache.diskCache.valueWithExtendedData(forKey: url) {
+    // ...
 }
-diskCache.customFileNameBlock = { key in
-    key.replacingOccurrences(of: "/", with: "_")
+```
+
+---
+
+## 🧵 Concurrency
+
+- `MemoryCache`, `DiskCache`, and `Cache` are all `@unchecked Sendable`.
+- `MemoryCache` is protected by `os_unfair_lock`; `DiskCache` by a `DispatchSemaphore`.
+- `async` methods dispatch onto an internal `DispatchQueue` so they never block the caller's thread.
+- `Transformer<Value>` is `Sendable` — encode / decode closures must be `@Sendable`.
+
+### Concurrent key access
+
+Reading and writing the same key from multiple concurrent tasks is safe — operations are serialized by the lock. If you need to make multiple reads / writes atomic with respect to each other, protect them at the call site.
+
+---
+
+## 🗺 Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Cache<Key, Value>                        │
+│    (coordinates memory + disk, Transformer is shared)       │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+        ┌────────────────┴────────────────┐
+        │                                 │
+┌───────▼─────────┐              ┌────────▼────────────┐
+│ MemoryCache     │              │ DiskCache           │
+│  <Key, Value>   │              │  <Key, Value>       │
+│ ─────────────── │              │ ─────────────────── │
+│ LRU linked list │              │ raw transformer     │
+│ os_unfair_lock  │              │       payload       │
+│ UIKit warnings  │              │ DispatchSemaphore   │
+└─────────────────┘              └──────────┬──────────┘
+                                            │
+                                   ┌────────▼────────┐
+                                   │  KVStorage      │
+                                   │ (internal)      │
+                                   │ ─────────────── │
+                                   │ SQLite manifest │
+                                   │ + data files    │
+                                   │ + trash folder  │
+                                   └─────────────────┘
+```
+
+`KVStorage` is kept **internal**; app code talks to it only via `DiskCache` or `Cache`. Each disk entry is exactly what the `Transformer` produces — no header, no envelope — and its write time comes from the SQLite manifest's `modTime` (second-level precision) used for cache-level expiration checks.
+
+---
+
+## 🔑 Keys
+
+Any `Hashable & Sendable` type works as a key. On disk, keys are converted to stable strings via `String(describing:)`; override `CustomStringConvertible.description` to control the on-disk representation:
+
+```swift
+struct ItemKey: Hashable, CustomStringConvertible {
+    let userID: Int
+    let scope: String
+    var description: String { "\(scope)-\(userID)" }
 }
 ```
 
----
+For file names (used when values spill to standalone files on disk), override via `DiskCache.fileNameProvider`:
 
-## 🏗️ Architecture
-
-```
-┌──────────────────────────────────────┐
-│              Cache                   │   Facade: memory + disk coordination
-├────────────────┬─────────────────────┤
-│  MemoryCache   │     DiskCache       │
-│  (LRU list)    │  (archive + LRU)    │
-│                ├─────────────────────┤
-│                │      KVStorage      │   SQLite + file-system backend
-└────────────────┴─────────────────────┘
-```
-
-| Type | Responsibility |
-| --- | --- |
-| `Cache` | Top-level API — reads hit memory first, falling back to disk and repopulating memory on miss |
-| `MemoryCache<Key, Value>` | Thread-safe LRU memory cache backed by a doubly-linked list + hash map; supports count / cost / age eviction |
-| `DiskCache` | `KVStorage`-backed disk cache that adds archiving, LRU eviction, and free-space management |
-| `KVStorage` | Low-level key-value store; `KVStorageType` (`.sqlite` / `.file` / `.mixed`) controls where each value is placed |
-| `NSCodingBox` | `Sendable` wrapper around `any NSCoding`, used to safely pass values through Swift 6 concurrency boundaries |
-
-Disk layout produced by `KVStorage`:
-
-```
-/path/
-  ├── manifest.sqlite          # metadata & small inline blobs
-  ├── manifest.sqlite-shm
-  ├── manifest.sqlite-wal
-  ├── data/                    # standalone files for large values
-  │   └── e10adc3949ba59abbe56e057f20f883e
-  └── trash/                   # removal staging (emptied asynchronously)
+```swift
+diskCache.fileNameProvider = { key in "item-\(key.userID)" }
 ```
 
 ---
 
-## ⚙️ Configuration
+## 📊 Benchmark
 
-### MemoryCache
+Tested on **iPhone 15 Pro**, 200,000 key-value pairs for memory, 1,000 key-value pairs for disk. All times in **milliseconds** (lower is better).
 
-| Property | Description | Default |
-| --- | --- | --- |
-| `countLimit` | Maximum number of objects | `Int.max` |
-| `costLimit` | Maximum total cost (bytes) | `Int.max` |
-| `ageLimit` | Maximum age of an object (seconds) | `.greatestFiniteMagnitude` |
-| `autoTrimInterval` | Auto-trim check interval | `5.0` seconds |
-| `shouldRemoveAllObjectsOnMemoryWarning` | Flush on memory warning | `true` |
-| `shouldRemoveAllObjectsWhenEnteringBackground` | Flush when entering background | `true` |
+### Memory Cache
 
-### DiskCache
+| Test | YYMemoryCache | RECache | NSCache | Swift Dict | Dict + Lock |
+|------|:---:|:---:|:---:|:---:|:---:|
+| **set** (200k pairs) | 61.78 | **27.08** | 55.69 | 9.43 | 9.07 |
+| **set** (no resize) | 31.52 | **18.80** | 34.81 | 2.63 | 4.43 |
+| **get** (sequential) | 20.95 | **17.11** | 21.56 | 2.72 | 2.95 |
+| **get** (random) | 31.09 | 32.29 | 31.97 | 5.05 | 5.00 |
+| **get** (mixed hit/miss) | 28.49 | **27.86** | 24.93 | 6.32 | 6.68 |
 
-| Property | Description | Default |
-| --- | --- | --- |
-| `inlineThreshold` | Values larger than this are stored as separate files; smaller ones go into SQLite | `20480` (20KB) |
-| `countLimit` | Maximum number of objects | `UInt.max` |
-| `costLimit` | Maximum total bytes | `UInt.max` |
-| `ageLimit` | Maximum age of an object (seconds) | `.greatestFiniteMagnitude` |
-| `freeDiskSpaceLimit` | Minimum free disk space to maintain; eviction triggers below this threshold | `0` |
-| `autoTrimInterval` | Auto-trim check interval | `60` seconds |
+> Swift Dict / Dict + Lock are baselines without LRU, eviction, or thread safety overhead.
 
----
+Columns are grouped **file mode · SQLite mode · mixed (default)**. `YY (file)` / `YY (SQLite)` talk to `YYKVStorage` directly; `YYDiskCache` is the default `YYDiskCache` (mixed mode). Likewise, `RECache (file)` / `RECache (SQLite)` pin `DiskCache` with `inlineThreshold: 0` / `.max`; **`RECache`** is the default mixed mode that auto-routes small payloads to SQLite and large ones to the file store.
 
-## 🧵 Concurrency Model
+### Disk Cache — Write
 
-- `MemoryCache` uses `os_unfair_lock` to protect its internal linked list
-- `DiskCache` uses a `DispatchSemaphore` to serialize access to the underlying `KVStorage`
-- `KVStorage` is **not** thread-safe on its own — all access must happen inside the `DiskCache` lock
-- To keep binary compatibility with `YYCache`'s synchronous API, `Cache` / `DiskCache` use `@unchecked Sendable`. Every such use is annotated in source with its safety invariant and a future migration plan toward an `actor`-based API.
+| Test | YY (file) | RECache (file) | YY (SQLite) | RECache (SQLite) | YYDiskCache | **RECache** |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|
+| **set** NSNumber | 322.54 | 386.41 | 49.23 | 57.36 | 49.96 | **51.14** |
+| **set** Data (100KB) | 461.79 | **396.86** | 624.43 | 542.96 | 523.38 | **414.73** |
+| **replace** NSNumber | 189.90 | 173.06 | 72.14 | 70.53 | 75.20 | **74.62** |
+| **replace** Data (100KB) | 305.61 | 227.51 | 546.03 | 562.34 | 296.51 | **215.49** |
 
----
+### Disk Cache — Read
 
-## 🧪 Testing
+| Test | YY (file) | RECache (file) | YY (SQLite) | RECache (SQLite) | YYDiskCache | **RECache** |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|
+| **get** NSNumber (random, cold) | 152.90 | 154.20 | 29.78 | 31.28 | 28.66 | 37.55 |
+| **get** Data 100KB (random, cold) | 252.16 | 252.30 | 525.05 | 519.32 | 289.61 | **247.95** |
+| **get** NSNumber (random, warm) | 149.28 | 148.06 | 36.82 | 36.59 | 32.48 | **32.09** |
+| **get** Data 100KB (random, warm) | 246.95 | 249.26 | 539.86 | 537.50 | 279.30 | **243.34** |
+| **get** none exist (small) | 1.94 | 1.95 | 1.98 | 1.98 | 2.00 | 1.95 |
+| **get** none exist (large) | 1.84 | 1.81 | 1.87 | 1.83 | 1.86 | **1.83** |
 
-The project uses [Swift Testing](https://developer.apple.com/documentation/testing) and provides unit tests for `MemoryCache`, `DiskCache`, `KVStorage`, and `Cache`:
-
-```bash
-swift test
-```
-
----
-
-## 📋 Requirements
-
-- Swift 6.0+
-- iOS 13.0+ / tvOS 13.0+
-- Xcode 16.0+
-
----
-
-## 📝 Credits
-
-RECache is a Swift port of [ibireme/YYCache](https://github.com/ibireme/YYCache). Huge thanks to the original author **ibireme** for the outstanding work.
+> `RECache` pays a small fixed overhead per lookup to apply the ``Transformer`` / `Codable` round-trip (`49.96 → 51.14` for NSNumber writes, `28.66 → 37.55` for NSNumber reads). In exchange, the default mixed mode wins on the workloads that actually dominate in practice — 100 KB `Data` payloads, both write and read, cold and warm.
 
 ---
 
 ## 📄 License
 
-RECache is released under the MIT License. See [LICENSE](LICENSE) for details.
+RECache is released under the MIT license. Portions derive from YYCache, also MIT. See [LICENSE](LICENSE).
 
-The underlying algorithms, disk layout, and API design originate from YYCache (MIT License, © 2015 ibireme).
+---
+
+## 🙏 Credits
+
+- [YYCache](https://github.com/ibireme/YYCache) by ibireme — the SQLite + file-system storage engine and the LRU designs this library builds on.
