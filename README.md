@@ -34,7 +34,7 @@ RECache is a modern, generic, **memory + disk** two-tier key-value cache for Swi
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/reers/RECache.git", from: "2.0.0")
+    .package(url: "https://github.com/reers/RECache.git", from: "1.0.0")
 ]
 ```
 
@@ -276,7 +276,7 @@ Columns are grouped **file mode · SQLite mode · mixed (default)**. `YY (file)`
 |------|:---:|:---:|:---:|:---:|:---:|:---:|
 | **get** NSNumber (random, cold) | 152.90 | 154.20 | 29.78 | 31.28 | 28.66 | 37.55 |
 | **get** Data 100KB (random, cold) | 252.16 | 252.30 | 525.05 | 519.32 | 289.61 | **247.95** |
-| **get** NSNumber (random, warm) | 149.28 | 148.06 | 36.82 | 36.59 | 32.48 | **32.09** |
+| **get** NSNumber (random, warm) | 149.28 | 148.06 | 36.82 | 36.59 | 32.48 | **39** |
 | **get** Data 100KB (random, warm) | 246.95 | 249.26 | 539.86 | 537.50 | 279.30 | **243.34** |
 | **get** none exist (small) | 1.94 | 1.95 | 1.98 | 1.98 | 2.00 | 1.95 |
 | **get** none exist (large) | 1.84 | 1.81 | 1.87 | 1.83 | 1.86 | **1.83** |
