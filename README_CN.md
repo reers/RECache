@@ -97,7 +97,7 @@ let images = DiskCache<URL, UIImage>(path: NSTemporaryDirectory() + "images")!
 ```swift
 // 分层配置 —— 内存和磁盘各自一个过期策略。
 cache.memoryCache.expiration = .seconds(300)
-cache.diskCache.expiration = .seconds(60 * 60 * 24)
+cache.diskCache.expiration = .days(10)
 
 // 也可以用绝对时间。
 cache.memoryCache.expiration = .date(futureDate)
