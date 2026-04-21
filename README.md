@@ -97,7 +97,7 @@ let images = DiskCache<URL, UIImage>(path: NSTemporaryDirectory() + "images")!
 ```swift
 // Configured per layer — memory and disk have independent policies.
 cache.memoryCache.expiration = .seconds(300)
-cache.diskCache.expiration = .seconds(60 * 60 * 24)
+cache.diskCache.expiration = .days(10)
 
 // Or with an absolute deadline.
 cache.memoryCache.expiration = .date(futureDate)
