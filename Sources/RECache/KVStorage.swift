@@ -171,13 +171,6 @@ final class KVStorage {
 
     // MARK: - Private Properties
 
-    // MARK: - Concurrency Migration
-    // Previously: `trashQueue = DispatchQueue(label: "com.reers.cache.disk.trash")`.
-    // Removed entirely; `fileEmptyTrashInBackground()` now uses
-    // `Task.detached(priority: .utility)`. Trash cleanup is low-frequency
-    // (once on init + once per `reset()`), so `Task` allocation cost is
-    // irrelevant, and we get structured cancellation + no stored queue.
-
     private let dbPath: String
     private let dataPath: String
     private let trashPath: String
@@ -1462,10 +1455,6 @@ final class KVStorage {
     }
 
     private func fileEmptyTrashInBackground() {
-        // MARK: - Concurrency Migration
-        // Previously: `trashQueue.async { ... }` on a dedicated serial queue.
-        // Now: `Task.detached(priority: .utility)`. Behaviourally equivalent
-        // fire-and-forget; `trashPath` is captured by value (String is Sendable).
         let trashPath = self.trashPath
         Task.detached(priority: .utility) {
             let manager = FileManager()

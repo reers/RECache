@@ -34,7 +34,7 @@ RECache is a modern, generic, **memory + disk** two-tier key-value cache for Swi
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/reers/RECache.git", from: "1.0.0")
+    .package(url: "https://github.com/reers/RECache.git", from: "2.0.0")
 ]
 ```
 
@@ -156,8 +156,8 @@ if let (value, meta) = try cache.diskCache.valueWithExtendedData(forKey: url) {
 ## 🧵 Concurrency
 
 - `MemoryCache`, `DiskCache`, and `Cache` are all `@unchecked Sendable`.
-- `MemoryCache` is protected by `os_unfair_lock`; `DiskCache` by a `DispatchSemaphore`.
-- `async` methods dispatch onto an internal `DispatchQueue` so they never block the caller's thread.
+- `MemoryCache` is protected by `os_unfair_lock`; `DiskCache` also uses `os_unfair_lock`.
+- `async` overloads call the lock-protected internals directly — no extra dispatch hop.
 - `Transformer<Value>` is `Sendable` — encode / decode closures must be `@Sendable`.
 
 ### Concurrent key access
@@ -206,7 +206,7 @@ let cache = Cache<String, MyModel>(
 │ ─────────────── │              │ ─────────────────── │
 │ LRU linked list │              │ raw transformer     │
 │ os_unfair_lock  │              │       payload       │
-│ UIKit warnings  │              │ DispatchSemaphore   │
+│ UIKit warnings  │              │ os_unfair_lock      │
 └─────────────────┘              └──────────┬──────────┘
                                             │
                                    ┌────────▼────────┐

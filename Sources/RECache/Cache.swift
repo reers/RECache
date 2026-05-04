@@ -76,10 +76,6 @@ public final class Cache<Key: Hashable & Sendable, Value: Sendable>: @unchecked 
     }
 
     // MARK: - Sync API
-    //
-    // The sync methods below are marked `@available(*, noasync)`: calling them
-    // from an async context triggers a warning (or an error under Swift 6 /
-    // strict concurrency). Use the `async` overloads with `await` instead.
 
     /// Returns whether a non-expired entry exists for `key` in either layer.
     @available(*, noasync, message: "Use `await` in async contexts.")

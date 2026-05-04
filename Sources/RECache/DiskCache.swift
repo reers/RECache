@@ -122,44 +122,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     // MARK: - Private state
 
     private var kv: KVStorage?
-
-    // MARK: - Concurrency Migration
-    //
-    // Was: `DispatchSemaphore(value: 1)` used as a plain mutex (every
-    // `wait/signal` pair was a lock critical section — no cross-thread
-    // signalling semantics). Replaced with `os_unfair_lock` (the same
-    // primitive `MemoryCache` uses) because:
-    //   1. `os_unfair_lock_lock / _unlock` is the fastest Darwin mutex
-    //      (~15-25 ns uncontested) while being semantically identical to
-    //      a `DispatchSemaphore(value: 1)` used as a mutex.
-    //   2. It unifies the two caches on one lock primitive.
-    //   3. `OSAllocatedUnfairLock` (iOS 16+) and `Synchronization.Mutex`
-    //      (iOS 18+) are not available on the iOS 13+ deployment floor.
-    //
-    // Stored as a heap-allocated `os_unfair_lock_t` so its identity is
-    // stable across any copies / property-wrapper indirection. `deinit`
-    // tears it down.
     private let lock: os_unfair_lock_t
-
-    // MARK: - Concurrency Migration
-    //
-    // Was: `DispatchQueue(label: "com.reers.cache.disk", attributes: .concurrent)`
-    // used for (a) `withCheckedContinuation + queue.async` bridges in
-    // every `async` wrapper, and (b) the body of `asyncRemoveAll`.
-    //
-    // Now:
-    //   (a) `async` overloads call non-`noasync` internal helpers
-    //       (`_contains`, `_value`, `_set`, …) directly. `os_unfair_lock`
-    //       serialises access to `kv`, so an extra dispatch hop bought
-    //       nothing.
-    //   (b) `asyncRemoveAll` uses `Task.detached(priority: .utility)`.
-    //
-    // The concurrent queue was also misleading: every job `lock.wait()`ed
-    // before touching `kv`, so it was effectively serial. Removing it
-    // makes that explicit.
-
-    /// Handle to the background auto-trim Task. Cancelled in `deinit`.
-    /// Replaces the old recursive `DispatchQueue.asyncAfter` chain.
     private var trimTask: Task<Void, Never>?
 
     #if canImport(UIKit) || canImport(AppKit)
@@ -223,19 +186,12 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
             NotificationCenter.default.removeObserver(observer)
         }
         #endif
-        // MARK: - Concurrency Migration
-        // Was: recursive asyncAfter chain relied on `[weak self]` nil to
-        // stop. Now we own a Task handle and cancel it deterministically.
         trimTask?.cancel()
         lock.deinitialize(count: 1)
         lock.deallocate()
     }
 
     // MARK: - Sync API
-    //
-    // The sync methods below are marked `@available(*, noasync)`: calling them
-    // from an async context triggers a warning (or an error under Swift 6 /
-    // strict concurrency). Use the `async` overloads with `await` instead.
 
     /// Returns whether a non-expired entry exists for `key`.
     @available(*, noasync, message: "Use `await` in async contexts.")
@@ -300,12 +256,6 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     ///
     /// Returns immediately; work runs on a background executor and delivers
     /// callbacks from that executor. Safe to invoke from any context.
-    //
-    // MARK: - Concurrency Migration
-    // Was: `queue.async { [weak self] in lock.wait(); kv.removeAllItems(...); lock.signal() }`.
-    // Now: `Task.detached(priority: .utility) { … }`. Semantics match —
-    // fire-and-forget work on a background executor. The callbacks are
-    // still invoked from that executor, as before.
     public func asyncRemoveAll(
         progress: (@Sendable (_ removed: Int32, _ total: Int32) -> Void)?,
         completion: (@Sendable (_ error: Bool) -> Void)?
@@ -315,10 +265,6 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
                 completion?(true)
                 return
             }
-            // Delegated to a sync helper because `os_unfair_lock_lock` /
-            // `_unlock` are `OS_SWIFT_UNAVAILABLE_FROM_ASYNC`; sitting them
-            // inside a non-async helper keeps the call site itself out of
-            // async context.
             self._asyncRemoveAllLocked(progress: progress, completion: completion)
         }
     }
@@ -369,15 +315,6 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     }
 
     // MARK: - Async API
-    //
-    // MARK: - Concurrency Migration
-    // Each of these previously went through a
-    // `withCheckedContinuation + queue.async { self?.syncMethod(...) }`
-    // double-hop. Now they call the non-`noasync` internal helpers
-    // (`_contains`, `_value`, …) directly. The sync implementations are
-    // already thread-safe under `os_unfair_lock`, so calling them from any
-    // isolation is safe, and we save one continuation allocation plus one
-    // GCD enqueue per call.
 
     /// Async overload of ``contains(_:)``.
     public nonisolated func contains(_ key: Key) async -> Bool {
@@ -595,13 +532,6 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         os_unfair_lock_unlock(lock)
     }
 
-    // MARK: - Concurrency Migration
-    //
-    // Was: `DispatchQueue.global(qos:.utility).asyncAfter(deadline: …) { [weak self] in trimInBackground(); trimRecursively() }`.
-    // Now: a single `Task.detached(priority:.utility)` sleeps between
-    // iterations. `trimTask` holds the handle so `deinit` can cancel
-    // the loop without having to rely on weak-self nil'ing to stop the
-    // next rescheduled block.
     private func startAutoTrim() {
         trimTask = Task.detached(priority: .utility) { [weak self] in
             while !Task.isCancelled {
@@ -615,9 +545,6 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     }
 
     private func trimInBackground() {
-        // Single critical section covering cost / count / age / freespace
-        // trims, matching the original semantics (was previously one
-        // `lock.wait() … lock.signal()` block inside `queue.async`).
         os_unfair_lock_lock(lock)
         _trimToCost(costLimit)
         _trimToCount(countLimit)
@@ -626,9 +553,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         os_unfair_lock_unlock(lock)
     }
 
-    /// Lock-held variant of `_removeExpired()`: `trimInBackground` already
-    /// holds `lock`, so we mustn't take it again (`os_unfair_lock` is not
-    /// reentrant — the second `_lock` would deadlock the thread).
+    /// Lock-held variant — called from `trimInBackground` which already holds `lock`.
     private func _removeExpired_locked() {
         switch expiration {
         case .never:

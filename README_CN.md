@@ -156,8 +156,8 @@ if let (value, meta) = try cache.diskCache.valueWithExtendedData(forKey: url) {
 ## 🧵 并发
 
 - `MemoryCache`、`DiskCache`、`Cache` 都是 `@unchecked Sendable`
-- `MemoryCache` 用 `os_unfair_lock` 保护；`DiskCache` 用 `DispatchSemaphore`
-- `async` 方法派发到内部 `DispatchQueue`，不会阻塞调用线程
+- `MemoryCache` 用 `os_unfair_lock` 保护；`DiskCache` 同样使用 `os_unfair_lock`
+- `async` 方法直接调用锁保护的内部实现，无额外派发开销
 - `Transformer<Value>` 是 `Sendable`，`encode`/`decode` 闭包都需要 `@Sendable`
 
 ### 并发访问同一个 key
@@ -206,7 +206,7 @@ let cache = Cache<String, MyModel>(
 │ ─────────────── │              │ ─────────────────── │
 │ LRU 双向链表    │              │ transformer 原始    │
 │ os_unfair_lock  │              │       payload       │
-│ UIKit 内存警告  │              │ DispatchSemaphore   │
+│ UIKit 内存警告  │              │ os_unfair_lock      │
 └─────────────────┘              └──────────┬──────────┘
                                             │
                                    ┌────────▼────────┐

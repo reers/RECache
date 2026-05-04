@@ -21,7 +21,6 @@
 //  THE SOFTWARE.
 
 import Foundation
-import QuartzCore
 import os.lock
 #if canImport(UIKit)
 import UIKit
@@ -169,12 +168,6 @@ internal final class LinkedList<Key: Hashable & Sendable, Value: Sendable> {
         head = nil
         tail = nil
 
-        // MARK: - Concurrency Migration
-        // Was: DispatchQueue.global(qos:.utility).async / DispatchQueue.main.async.
-        // Now: Task.detached(priority:.utility) for background release,
-        // Task { @MainActor } for main-thread release. Semantics are the same —
-        // the closure only keeps `holder` alive until it runs, then the nodes
-        // ARC-release off the caller's thread.
         if releaseAsynchronously {
             if releaseOnMainThread {
                 Task { @MainActor [holder] in
@@ -312,26 +305,13 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     @usableFromInline internal let lock: os_unfair_lock_t
     @usableFromInline internal let linkedList = LinkedList<Key, Value>()
 
-    /// Stored closure that asynchronously trims the cache down to
-    /// `costLimit`. Built **inside `init`** (not inlinable) so the
-    /// `[weak self]` closure literal never lives in an `@inlinable` SIL
-    /// body — that combination crashes the current Swift SIL-deserializer
-    /// during cross-module specialization. The `@inlinable`
-    /// `set(_:forKey:cost:)` only sees a single indirect call to this
-    /// property.
-    ///
-    /// Default `{ }` is just a placeholder so the stored property satisfies
-    /// `let`-style initialization; `init` overwrites it with the real
-    /// dispatching closure once all stored props are set.
+    /// Stored closure that asynchronously trims the cache down to `costLimit`.
+    /// Built inside `init` to avoid `[weak self]` closure literals in
+    /// `@inlinable` bodies (which crash SIL cross-module specialization).
     @usableFromInline
     internal var _scheduleAsyncTrim: @Sendable () -> Void = { }
 
 
-    // MARK: - Concurrency Migration
-    // Handle to the background auto-trim loop. Previously the loop was a
-    // recursive `DispatchQueue.global(qos: .utility).asyncAfter(...)` chain
-    // that relied on `[weak self]` to stop. Now it's a single unstructured
-    // `Task` whose lifetime we own explicitly, and `deinit` cancels it.
     private var trimTask: Task<Void, Never>?
 
     #if canImport(UIKit)
@@ -371,9 +351,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         }
         #endif
 
-        // IMPORTANT: This closure literal must live in `init` (which is
-        // NOT `@inlinable`), never inside `set`. Otherwise cross-module
-        // SIL specialization of `set<Int, Data>` etc. crashes the compiler.
         _scheduleAsyncTrim = { [weak self] in
             Task.detached(priority: .utility) { [weak self] in
                 self?.trim(toCost: self?.costLimit ?? .max)
@@ -392,11 +369,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
             NotificationCenter.default.removeObserver(observer)
         }
         #endif
-        // MARK: - Concurrency Migration
-        // Cancel the structured background trim Task. With the old
-        // `asyncAfter + [weak self]` pattern, stopping the loop depended on
-        // `self` being nil'd inside the closure; we had no handle to cancel
-        // it eagerly. Now we do.
         trimTask?.cancel()
         removeAll()
         lock.deinitialize(count: 1)
@@ -404,10 +376,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     }
 
     // MARK: - Sync API
-    //
-    // The sync methods below are marked `@available(*, noasync)`: calling them
-    // from an async context triggers a warning (or an error under Swift 6 /
-    // strict concurrency). Use the `async` overloads with `await` instead.
 
     /// Returns whether a non-expired entry exists for `key`.
     @available(*, noasync, message: "Use `await` in async contexts.")
@@ -426,15 +394,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     public func value(forKey key: Key) -> Value? {
         _value(forKey: key)
     }
-
-    // MARK: - Concurrency Migration
-    //
-    // Non-`noasync` internal implementations shared by the public sync
-    // wrappers (which keep `@available(*, noasync)` to steer users to the
-    // `async` overloads) and the `async` overloads (which used to hop
-    // through `withCheckedContinuation + queue.async` and now just call
-    // these directly — the `os_unfair_lock` already makes them thread-safe
-    // to invoke from any isolation).
 
     @inlinable
     internal func _contains(_ key: Key) -> Bool {
@@ -475,16 +434,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     ///     `remove(forKey:)`.
     ///   - key: The key.
     ///   - cost: Cost of the entry in your chosen unit (bytes, items, ...).
-    //
-    // `set` is `@inlinable` so consumers get cross-module specialization
-    // for concrete `Key` types (no per-call Hashable witness-table dispatch).
-    //
-    // The body intentionally delegates overflow trimming to the stored
-    // closure `_scheduleAsyncTrim` (built in `init`), never creating a
-    // `[weak self]`/`DispatchQueue.async` closure literal here. That
-    // combination inside an `@inlinable` generic-class body trips a SIL
-    // deserializer crash on current Swift toolchains during cross-module
-    // specialization. See the `_scheduleAsyncTrim` declaration for detail.
     @available(*, noasync, message: "Use `await` in async contexts.")
     @inlinable
     public func set(_ value: Value?, forKey key: Key, cost: Int = 0) {
@@ -509,12 +458,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     public func removeExpired() {
         _removeExpired()
     }
-
-    // MARK: - Concurrency Migration
-    //
-    // Internal write-path helpers. Same reasoning as `_contains` / `_value`:
-    // the public API keeps `@available(*, noasync)` for IDE guidance, and
-    // both the sync wrappers and the `async` overloads call these.
 
     @inlinable
     internal func _set(_ value: Value?, forKey key: Key, cost: Int = 0) {
@@ -556,9 +499,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         os_unfair_lock_unlock(lock)
 
         if overflowCost {
-            // Delegate to the stored closure built in `init`. See the
-            // `_scheduleAsyncTrim` declaration for why the closure literal
-            // cannot live here.
             _scheduleAsyncTrim()
         }
     }
@@ -599,11 +539,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         os_unfair_lock_unlock(lock)
 
         if holder.isEmpty { return }
-        // MARK: - Concurrency Migration
-        // Was: DispatchQueue.global(qos: .utility) / .main async { _ = holder }
-        // Now: Task.detached(priority: .utility) / Task { @MainActor }.
-        // Both patterns hold `holder` alive until the closure runs, then
-        // ARC releases the nodes off the caller's thread — identical semantics.
         if releaseAsync {
             if releaseOnMain {
                 Task { @MainActor [holder] in _ = holder }
@@ -650,15 +585,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     }
 
     // MARK: - Async API
-    //
-    // MARK: - Concurrency Migration
-    // The old implementations each paid a `withCheckedContinuation + queue.async`
-    // double-hop just to reach a method that is already thread-safe under
-    // `os_unfair_lock`. Those indirections are gone: each `async` overload
-    // now calls the non-`noasync` internal helper (`_contains`, `_value`, …)
-    // directly, inheriting the caller's isolation via `nonisolated`. The
-    // lock enforces the critical section regardless of which executor the
-    // call comes in on.
 
     /// Async overload of ``set(_:forKey:cost:)``.
     public nonisolated func set(_ value: Value?, forKey key: Key, cost: Int = 0) async {
@@ -692,16 +618,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
 
     // MARK: - Private
 
-    // `@inlinable internal` (not `private`) so the `@inlinable`
-    // hot-path methods can reference this helper and still specialize.
-    //
-    // MARK: - Concurrency Migration
-    // Was: DispatchQueue.global(qos: .utility) / .main async { _ = node }
-    // Now: Task.detached(priority: .utility) / Task { @MainActor }.
-    // The trailing closure's only job is to extend `node`'s lifetime to a
-    // background executor and then drop it — `Task` does that just as well
-    // as `DispatchQueue.async`, at roughly the same cost for a
-    // fire-and-forget one-shot job.
     @inlinable
     internal func scheduleRelease(of node: LinkedListNode<Key, Value>) {
         if linkedList.releaseAsynchronously {
@@ -715,14 +631,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         }
     }
 
-    // MARK: - Concurrency Migration
-    // Replaces the old recursive `DispatchQueue.global(qos:).asyncAfter`
-    // chain. A single unstructured `Task` sleeps on each iteration; its
-    // handle (`trimTask`) is stored and cancelled in `deinit`.
-    //
-    // Serialization between the auto-trim and explicit `trim(...)` callers
-    // is now enforced by the same `os_unfair_lock` the LRU list uses, so
-    // we no longer need the serial `queue` for that purpose.
     private func trimRecursively() {
         trimTask = Task.detached(priority: .utility) { [weak self] in
             while !Task.isCancelled {
@@ -738,10 +646,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     }
 
     private func trimInBackground() {
-        // Called from the auto-trim Task; executes on whatever executor
-        // the detached Task happens to pick. `trim(toCost:)`, `trim(toCount:)`
-        // and `_removeExpired()` all take `os_unfair_lock` internally,
-        // so calling them straight from the Task is safe.
         trim(toCost: costLimit)
         trim(toCount: countLimit)
         _removeExpired()
@@ -777,8 +681,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
             }
         }
 
-        // MARK: - Concurrency Migration
-        // Was: DispatchQueue release hop. See `scheduleRelease(of:)`.
         if !holder.isEmpty {
             if releaseOnMainThread {
                 Task { @MainActor [holder] in _ = holder }
@@ -818,7 +720,6 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
             }
         }
 
-        // MARK: - Concurrency Migration — see `_trimToCost`.
         if !holder.isEmpty {
             if releaseOnMainThread {
                 Task { @MainActor [holder] in _ = holder }
