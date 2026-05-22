@@ -229,6 +229,16 @@ public final class MemoryCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         return linkedList.totalCost
     }
 
+    /// All keys currently in the cache (read-only).
+    ///
+    /// Returns a snapshot of keys under lock; subsequent mutations won't
+    /// affect the returned array.
+    public var allKeys: [Key] {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        return Array(linkedList.nodeMap.keys)
+    }
+
     // MARK: - Limits
 
     /// Maximum number of entries the cache should hold. Default: `Int.max`

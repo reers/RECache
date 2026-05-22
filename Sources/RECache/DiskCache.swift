@@ -368,6 +368,18 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         return Int(kv?.getItemsSize() ?? 0)
     }
 
+    /// All keys currently stored in the disk cache.
+    ///
+    /// Keys are returned as the raw `String` representation used internally
+    /// (see ``stringKey(for:)``). For `String`-keyed caches these are the
+    /// original keys; for other `Key` types the caller must handle the
+    /// conversion.
+    public var allKeys: [String] {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        return kv?.getAllKeys() ?? []
+    }
+
     // MARK: - Async API
     //
     // MARK: - Concurrency Migration
