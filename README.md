@@ -34,7 +34,7 @@ RECache is a modern, generic, **memory + disk** two-tier key-value cache for Swi
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/reers/RECache.git", from: "1.0.0")
+    .package(url: "https://github.com/reers/RECache.git", from: "1.0.1")
 ]
 ```
 

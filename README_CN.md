@@ -34,7 +34,7 @@ RECache 是一个现代化的、泛型化的 **内存 + 磁盘** 两级键值缓
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/reers/RECache.git", from: "2.0.0")
+    .package(url: "https://github.com/reers/RECache.git", from: "1.0.1")
 ]
 ```
 
