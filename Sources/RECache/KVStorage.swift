@@ -1349,14 +1349,14 @@ final class KVStorage {
     private func dbGetAllKeys() -> [String]? {
         let sql = "select key from manifest;"
         guard let stmt = dbPrepareStmt(sql) else { return nil }
-        var keys: [String] = []
+        var keys: [String]? = []
         while true {
             let result = sqlite3_step(stmt)
             if result == SQLITE_ROW {
                 if let rawKey = sqlite3_column_text(stmt, 0) {
                     let keyStr = String(cString: rawKey)
                     if !keyStr.isEmpty {
-                        keys.append(keyStr)
+                        keys?.append(keyStr)
                     }
                 }
             } else if result == SQLITE_DONE {
@@ -1365,7 +1365,7 @@ final class KVStorage {
                 if errorLogsEnabled {
                     NSLog("\(#function) line:\(#line) sqlite query error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
                 }
-                keys = []
+                keys = nil
                 break
             }
         }

@@ -193,6 +193,61 @@ struct DiskCacheTests {
         #expect(try cache.value(forKey: 2) == "two")
     }
 
+    // MARK: - allKeys
+
+    @Test func allKeysEmpty() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        #expect(cache.allKeys.isEmpty)
+    }
+
+    @Test func allKeysString() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try cache.set(1, forKey: "a")
+        try cache.set(2, forKey: "b")
+        try cache.set(3, forKey: "c")
+        let keys = cache.allKeys
+        #expect(keys.count == 3)
+        #expect(keys.contains("a"))
+        #expect(keys.contains("b"))
+        #expect(keys.contains("c"))
+    }
+
+    @Test func allKeysIntKeyRoundtrip() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<Int, String>(path: dir, transformer: .codable())!
+        try cache.set("one", forKey: 1)
+        try cache.set("two", forKey: 2)
+        // Key is Int, stored strings are "1" and "2" via String(describing:)
+        let keys = cache.allKeys
+        #expect(keys.count == 2)
+        #expect(keys.contains("1"))
+        #expect(keys.contains("2"))
+    }
+
+    @Test func allKeysAfterRemove() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        try cache.set(1, forKey: "keep")
+        try cache.set(2, forKey: "drop")
+        cache.remove(forKey: "drop")
+        let keys = cache.allKeys
+        #expect(keys.count == 1)
+        #expect(keys.contains("keep"))
+        #expect(!keys.contains("drop"))
+    }
+
+    @Test func allKeysAfterRemoveAll() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Int>(path: dir, transformer: .codable())!
+        for i in 0..<5 {
+            try cache.set(i, forKey: "k\(i)")
+        }
+        cache.removeAll()
+        #expect(cache.allKeys.isEmpty)
+    }
+
     // MARK: - Trim
 
     @Test func trimToCount() throws {
