@@ -704,6 +704,13 @@ final class KVStorage {
         return dbGetTotalItemSize()
     }
 
+    /// Get all keys in the storage.
+    ///
+    /// - Returns: Array of all keys, or an empty array if an error occurs.
+    func getAllKeys() -> [String] {
+        return dbGetAllKeys() ?? []
+    }
+
     // MARK: - db
 
     @discardableResult
@@ -1337,6 +1344,33 @@ final class KVStorage {
         let count = sqlite3_column_int(stmt, 0)
         sqlite3_reset(stmt)
         return count
+    }
+
+    private func dbGetAllKeys() -> [String]? {
+        let sql = "select key from manifest;"
+        guard let stmt = dbPrepareStmt(sql) else { return nil }
+        var keys: [String] = []
+        while true {
+            let result = sqlite3_step(stmt)
+            if result == SQLITE_ROW {
+                if let rawKey = sqlite3_column_text(stmt, 0) {
+                    let keyStr = String(cString: rawKey)
+                    if !keyStr.isEmpty {
+                        keys.append(keyStr)
+                    }
+                }
+            } else if result == SQLITE_DONE {
+                break
+            } else {
+                if errorLogsEnabled {
+                    NSLog("\(#function) line:\(#line) sqlite query error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
+                }
+                keys = []
+                break
+            }
+        }
+        sqlite3_reset(stmt)
+        return keys
     }
 
     // MARK: - file
