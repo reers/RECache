@@ -77,6 +77,56 @@ struct MemoryCacheTests {
         #expect(cache.totalCount == 1)
     }
 
+    // MARK: - allKeys
+
+    @Test func allKeysEmpty() {
+        let cache = MemoryCache<String, String>()
+        #expect(cache.allKeys.isEmpty)
+    }
+
+    @Test func allKeysString() {
+        let cache = MemoryCache<String, String>()
+        cache.set("a", forKey: "k1")
+        cache.set("b", forKey: "k2")
+        cache.set("c", forKey: "k3")
+        let keys = cache.allKeys
+        #expect(keys.count == 3)
+        #expect(keys.contains("k1"))
+        #expect(keys.contains("k2"))
+        #expect(keys.contains("k3"))
+    }
+
+    @Test func allKeysInt() {
+        let cache = MemoryCache<Int, String>()
+        for i in 0..<10 {
+            cache.set("val\(i)", forKey: i)
+        }
+        let keys = cache.allKeys
+        #expect(keys.count == 10)
+        #expect(keys.contains(3))
+        #expect(keys.contains(7))
+    }
+
+    @Test func allKeysAfterRemove() {
+        let cache = MemoryCache<String, Int>()
+        cache.set(1, forKey: "keep")
+        cache.set(2, forKey: "drop")
+        cache.remove(forKey: "drop")
+        let keys = cache.allKeys
+        #expect(keys.count == 1)
+        #expect(keys.contains("keep"))
+        #expect(!keys.contains("drop"))
+    }
+
+    @Test func allKeysAfterRemoveAll() {
+        let cache = MemoryCache<String, Int>()
+        for i in 0..<5 {
+            cache.set(i, forKey: "k\(i)")
+        }
+        cache.removeAll()
+        #expect(cache.allKeys.isEmpty)
+    }
+
     // MARK: - Limits
 
     @Test func countLimitEvictsLRU() {
