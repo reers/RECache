@@ -249,39 +249,39 @@ Tested on **iPhone 15 Pro**, 200,000 key-value pairs for memory, 1,000 key-value
 
 ### Memory Cache
 
-| Test | YYMemoryCache | RECache | NSCache | Swift Dict | Dict + Lock |
-|------|:---:|:---:|:---:|:---:|:---:|
-| **set** (200k pairs) | 61.78 | **27.08** | 55.69 | 9.43 | 9.07 |
-| **set** (no resize) | 31.52 | **18.80** | 34.81 | 2.63 | 4.43 |
-| **get** (sequential) | 20.95 | **17.11** | 21.56 | 2.72 | 2.95 |
-| **get** (random) | 31.09 | 32.29 | 31.97 | 5.05 | 5.00 |
-| **get** (mixed hit/miss) | 28.49 | **27.86** | 24.93 | 6.32 | 6.68 |
+| Test | YYMemoryCache | PINCache | RECache | NSCache | Swift Dict | Dict + Lock |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|
+| **set** (200k pairs) | 43.69 | 128.21 | **24.88** | 58.40 | 8.50 | 9.15 |
+| **set** (no resize) | 26.94 | 67.68 | **17.95** | 38.51 | 2.40 | 4.69 |
+| **get** (sequential) | 20.55 | 35.82 | **17.15** | 25.02 | 2.74 | 2.92 |
+| **get** (random) | 33.14 | 48.42 | **33.05** | 33.83 | 5.07 | 5.31 |
+| **get** (mixed hit/miss) | 29.72 | 38.46 | 29.93 | 26.74 | 6.34 | 6.42 |
 
 > Swift Dict / Dict + Lock are baselines without LRU, eviction, or thread safety overhead.
 
-Columns are grouped **file mode · SQLite mode · mixed (default)**. `YY (file)` / `YY (SQLite)` talk to `YYKVStorage` directly; `YYDiskCache` is the default `YYDiskCache` (mixed mode). Likewise, `RECache (file)` / `RECache (SQLite)` pin `DiskCache` with `inlineThreshold: 0` / `.max`; **`RECache`** is the default mixed mode that auto-routes small payloads to SQLite and large ones to the file store.
+Columns are grouped **file mode · SQLite mode · mixed (default)**. `YY (file)` / `YY (SQLite)` talk to `YYKVStorage` directly; `YYDiskCache` is the default `YYDiskCache` (mixed mode). `PINCache` is `PINDiskCache`. Likewise, `RECache (file)` / `RECache (SQLite)` pin `DiskCache` with `inlineThreshold: 0` / `.max`; **`RECache`** is the default mixed mode that auto-routes small payloads to SQLite and large ones to the file store.
 
 ### Disk Cache — Write
 
-| Test | YY (file) | RECache (file) | YY (SQLite) | RECache (SQLite) | YYDiskCache | **RECache** |
-|------|:---:|:---:|:---:|:---:|:---:|:---:|
-| **set** NSNumber | 322.54 | 386.41 | 49.23 | 57.36 | 49.96 | **51.14** |
-| **set** Data (100KB) | 461.79 | **396.86** | 624.43 | 542.96 | 523.38 | **414.73** |
-| **replace** NSNumber | 189.90 | 173.06 | 72.14 | 70.53 | 75.20 | **74.62** |
-| **replace** Data (100KB) | 305.61 | 227.51 | 546.03 | 562.34 | 296.51 | **215.49** |
+| Test | YY (file) | RECache (file) | YY (SQLite) | RECache (SQLite) | YYDiskCache | PINCache | **RECache** |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **set** NSNumber | 144.09 | 142.27 | 36.66 | **32.46** | 37.87 | 576.34 | 49.04 |
+| **set** Data (100KB) | 178.35 | **146.24** | 540.13 | 372.18 | 192.06 | 636.85 | **146.09** |
+| **replace** NSNumber | 163.63 | 144.92 | 63.95 | 63.97 | 64.23 | 554.22 | **59.36** |
+| **replace** Data (100KB) | 234.06 | **168.69** | 580.18 | 578.35 | 240.14 | 629.44 | 197.52 |
 
 ### Disk Cache — Read
 
-| Test | YY (file) | RECache (file) | YY (SQLite) | RECache (SQLite) | YYDiskCache | **RECache** |
-|------|:---:|:---:|:---:|:---:|:---:|:---:|
-| **get** NSNumber (random, cold) | 152.90 | 154.20 | 29.78 | 31.28 | 28.66 | 37.55 |
-| **get** Data 100KB (random, cold) | 252.16 | 252.30 | 525.05 | 519.32 | 289.61 | **247.95** |
-| **get** NSNumber (random, warm) | 149.28 | 148.06 | 36.82 | 36.59 | 32.48 | **39** |
-| **get** Data 100KB (random, warm) | 246.95 | 249.26 | 539.86 | 537.50 | 279.30 | **243.34** |
-| **get** none exist (small) | 1.94 | 1.95 | 1.98 | 1.98 | 2.00 | 1.95 |
-| **get** none exist (large) | 1.84 | 1.81 | 1.87 | 1.83 | 1.86 | **1.83** |
+| Test | YY (file) | RECache (file) | YY (SQLite) | RECache (SQLite) | YYDiskCache | PINCache | **RECache** |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **get** NSNumber (random, cold) | 160.39 | 153.76 | 39.97 | 41.01 | 39.24 | 204.82 | **38.01** |
+| **get** Data 100KB (random, cold) | 248.20 | **242.64** | 514.17 | 502.30 | 251.09 | 302.33 | 247.16 |
+| **get** NSNumber (random, warm) | 161.85 | 156.78 | 42.62 | 40.99 | 41.22 | 205.64 | **39.55** |
+| **get** Data 100KB (random, warm) | 243.25 | 245.09 | 532.42 | 513.66 | 246.29 | 302.12 | **245.85** |
+| **get** none exist (small) | 1.96 | 1.95 | 1.99 | **1.95** | 2.01 | 30.21 | 2.03 |
+| **get** none exist (large) | 2.03 | 1.95 | 1.95 | **1.83** | 1.98 | 30.81 | 1.96 |
 
-> `RECache` pays a small fixed overhead per lookup to apply the ``Transformer`` / `Codable` round-trip (`49.96 → 51.14` for NSNumber writes, `28.66 → 37.55` for NSNumber reads). In exchange, the default mixed mode wins on the workloads that actually dominate in practice — 100 KB `Data` payloads, both write and read, cold and warm.
+> `RECache` pays a small fixed overhead per lookup to apply the ``Transformer`` / `Codable` round-trip (`37.87 → 49.04` for NSNumber writes). In exchange, the default mixed mode wins on the workloads that actually dominate in practice — 100 KB `Data` writes, and stays even with `YYDiskCache` on 100 KB reads.
 
 ---
 
