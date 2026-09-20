@@ -21,6 +21,7 @@
 //  THE SOFTWARE.
 
 import Foundation
+import CryptoKit
 import os.lock
 #if canImport(UIKit)
 import UIKit
@@ -28,7 +29,7 @@ import UIKit
 import AppKit
 #endif
 
-private let filenameHashHexDigits = Array("0123456789abcdef".utf8)
+private let md5HexDigits = Array("0123456789abcdef".utf8)
 
 // MARK: - Free disk space helper
 
@@ -43,36 +44,17 @@ private func diskSpaceFree() -> Int64 {
     }
 }
 
-/// Stable 128-bit filename hash. Used only to derive compact file names, not
-/// for security, so a lightweight non-cryptographic hash is enough.
-private func stableFilenameHash(_ string: String) -> String {
-    let prime: UInt64 = 0x00000100_000001B3
-    var first: UInt64 = 0xCBF29CE4_84222325
-    var second: UInt64 = 0x84222325_CBF29CE4
-    var count: UInt64 = 0
-
-    for byte in string.utf8 {
-        let value = UInt64(byte)
-        first ^= value
-        first &*= prime
-        second ^= value &+ 0x9E37_79B9_7F4A_7C15
-        second &*= prime
-        count &+= 1
+/// MD5 hash of a string. Used only as a stable filename; not security-sensitive.
+/// Hex encoding uses a nibble lookup table instead of `String(format:)`.
+private func stringMD5(_ string: String) -> String {
+    let digest = Insecure.MD5.hash(data: Data(string.utf8))
+    var output = [UInt8](repeating: 0, count: Insecure.MD5.byteCount * 2)
+    var i = 0
+    for byte in digest {
+        output[i] = md5HexDigits[Int(byte >> 4)]
+        output[i + 1] = md5HexDigits[Int(byte & 0x0F)]
+        i += 2
     }
-    second ^= count &* 0x9E37_79B9_7F4A_7C15
-
-    var output = [UInt8](repeating: 0, count: 32)
-
-    @inline(__always)
-    func writeHex(_ value: UInt64, at offset: Int) {
-        for i in 0..<16 {
-            let shift = UInt64((15 - i) * 4)
-            output[offset + i] = filenameHashHexDigits[Int((value >> shift) & 0xF)]
-        }
-    }
-
-    writeHex(first, at: 0)
-    writeHex(second, at: 16)
     return String(decoding: output, as: UTF8.self)
 }
 
@@ -109,8 +91,8 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     /// Value serializer. Set at init and never changed.
     public let transformer: Transformer<Value>
 
-    /// Custom filename for a given key. If `nil`, a stable 128-bit hash of
-    /// `String(describing: key)` is used. Default: `nil`.
+    /// Custom filename for a given key. If `nil`, `md5(String(describing: key))`
+    /// is used. Default: `nil`.
     public var fileNameProvider: (@Sendable (Key) -> String)?
 
     // MARK: - Limits
@@ -636,7 +618,7 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
             let name = provider(key)
             if !name.isEmpty { return name }
         }
-        return stableFilenameHash(stringKey(for: key))
+        return stringMD5(stringKey(for: key))
     }
 
     private func appWillBeTerminated() {

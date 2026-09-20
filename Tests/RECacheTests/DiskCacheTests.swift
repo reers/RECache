@@ -358,10 +358,9 @@ struct DiskCacheTests {
 
         let dataPath = (dir as NSString).appendingPathComponent("data")
         let filenames = try FileManager.default.contentsOfDirectory(atPath: dataPath)
-        let hexDigits = Set("0123456789abcdef")
         #expect(filenames.count == 1)
-        #expect(filenames.first?.count == 32)
-        #expect(filenames.first?.allSatisfy { hexDigits.contains($0) } == true)
+        // md5("k") — default filename must stay MD5-compatible with existing caches.
+        #expect(filenames.first == "8ce4b16b22b58894aa86c421e8759df3")
     }
 
     // MARK: - Trim / removeExpired / totalCost
