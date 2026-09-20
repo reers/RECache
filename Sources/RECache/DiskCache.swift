@@ -29,6 +29,8 @@ import UIKit
 import AppKit
 #endif
 
+private let md5HexDigits = Array("0123456789abcdef".utf8)
+
 // MARK: - Free disk space helper
 
 private func diskSpaceFree() -> Int64 {
@@ -43,9 +45,17 @@ private func diskSpaceFree() -> Int64 {
 }
 
 /// MD5 hash of a string. Used only as a stable filename; not security-sensitive.
+/// Hex encoding uses a nibble lookup table instead of `String(format:)`.
 private func stringMD5(_ string: String) -> String {
     let digest = Insecure.MD5.hash(data: Data(string.utf8))
-    return digest.reduce(into: "") { $0 += String(format: "%02x", $1) }
+    var output = [UInt8](repeating: 0, count: Insecure.MD5.byteCount * 2)
+    var i = 0
+    for byte in digest {
+        output[i] = md5HexDigits[Int(byte >> 4)]
+        output[i + 1] = md5HexDigits[Int(byte & 0x0F)]
+        i += 2
+    }
+    return String(decoding: output, as: UTF8.self)
 }
 
 // MARK: - DiskCache
@@ -442,13 +452,15 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     internal func _contains(_ key: Key) -> Bool {
         if isKeyInvalid(key) { return false }
         let k = stringKey(for: key)
-        let now = Date()
 
         os_unfair_lock_lock(lock)
         let item = kv?.getItemInfo(forKey: k)
         os_unfair_lock_unlock(lock)
 
         guard let item else { return false }
+        if case .never = expiration { return true }
+
+        let now = Date()
         let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
         if expiration.isExpired(writtenAt: writeDate, now: now) {
             os_unfair_lock_lock(lock)
@@ -468,6 +480,9 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         os_unfair_lock_unlock(lock)
 
         guard let item, !item.value.isEmpty else { return nil }
+        if case .never = expiration {
+            return try transformer.decode(item.value)
+        }
 
         let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
         if expiration.isExpired(writtenAt: writeDate, now: Date()) {
@@ -497,6 +512,10 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         os_unfair_lock_unlock(lock)
 
         guard let item, !item.value.isEmpty else { return nil }
+        if case .never = expiration {
+            let value = try transformer.decode(item.value)
+            return (value, item.extendedData)
+        }
 
         let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
         if expiration.isExpired(writtenAt: writeDate, now: Date()) {
@@ -524,8 +543,9 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         let payload: Data = try transformer.encode(value)
 
         let k = stringKey(for: key)
+        let storageType = kv?.type
         var fname: String?
-        if kv?.type != .sqlite {
+        if storageType != .sqlite {
             if UInt(payload.count) > inlineThreshold {
                 fname = filename(for: key)
             }

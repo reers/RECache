@@ -309,7 +309,13 @@ final class KVStorage {
             }
             return true
         } else {
-            if type != .sqlite {
+            if type == .mixed {
+                if dbInsertInlineItem(withKey: key, value: value, extendedData: extendedData) {
+                    return true
+                }
+                if dbUpdateInlineItem(withKey: key, value: value, extendedData: extendedData) {
+                    return true
+                }
                 let existingFilename = dbGetFilename(withKey: key)
                 if let existingFilename = existingFilename {
                     fileDelete(withName: existingFilename)
@@ -897,6 +903,70 @@ final class KVStorage {
             return false
         }
         return true
+    }
+
+    private func dbUpdateInlineItem(withKey key: String, value: Data, extendedData: Data?) -> Bool {
+        let sql = "update manifest set size = ?1, inline_data = ?2, modification_time = ?3, last_access_time = ?4, extended_data = ?5 where key = ?6 and filename is null;"
+        guard let stmt = dbPrepareStmt(sql) else { return false }
+
+        let timestamp = Int32(time(nil))
+        sqlite3_bind_int(stmt, 1, Int32(value.count))
+        value.withUnsafeBytes { rawBuffer in
+            _ = sqlite3_bind_blob(stmt, 2, rawBuffer.baseAddress, Int32(rawBuffer.count), SQLITE_TRANSIENT)
+        }
+        sqlite3_bind_int(stmt, 3, timestamp)
+        sqlite3_bind_int(stmt, 4, timestamp)
+        if let extendedData = extendedData {
+            extendedData.withUnsafeBytes { rawBuffer in
+                _ = sqlite3_bind_blob(stmt, 5, rawBuffer.baseAddress, Int32(rawBuffer.count), SQLITE_TRANSIENT)
+            }
+        } else {
+            sqlite3_bind_blob(stmt, 5, nil, 0, nil)
+        }
+        _ = key.withCString { sqlite3_bind_text(stmt, 6, $0, -1, SQLITE_TRANSIENT) }
+
+        let result = sqlite3_step(stmt)
+        let changed = sqlite3_changes(db)
+        sqlite3_reset(stmt)
+        if result != SQLITE_DONE {
+            if errorLogsEnabled {
+                NSLog("\(#function) line:\(#line) sqlite update error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
+            }
+            return false
+        }
+        return changed > 0
+    }
+
+    private func dbInsertInlineItem(withKey key: String, value: Data, extendedData: Data?) -> Bool {
+        let sql = "insert or ignore into manifest (key, filename, size, inline_data, modification_time, last_access_time, extended_data) values (?1, null, ?2, ?3, ?4, ?5, ?6);"
+        guard let stmt = dbPrepareStmt(sql) else { return false }
+
+        let timestamp = Int32(time(nil))
+        _ = key.withCString { sqlite3_bind_text(stmt, 1, $0, -1, SQLITE_TRANSIENT) }
+        sqlite3_bind_int(stmt, 2, Int32(value.count))
+        value.withUnsafeBytes { rawBuffer in
+            _ = sqlite3_bind_blob(stmt, 3, rawBuffer.baseAddress, Int32(rawBuffer.count), SQLITE_TRANSIENT)
+        }
+        sqlite3_bind_int(stmt, 4, timestamp)
+        sqlite3_bind_int(stmt, 5, timestamp)
+        if let extendedData = extendedData {
+            extendedData.withUnsafeBytes { rawBuffer in
+                _ = sqlite3_bind_blob(stmt, 6, rawBuffer.baseAddress, Int32(rawBuffer.count), SQLITE_TRANSIENT)
+            }
+        } else {
+            sqlite3_bind_blob(stmt, 6, nil, 0, nil)
+        }
+
+        let result = sqlite3_step(stmt)
+        let changed = sqlite3_changes(db)
+        sqlite3_reset(stmt)
+        if result != SQLITE_DONE {
+            if errorLogsEnabled {
+                NSLog("\(#function) line:\(#line) sqlite insert error (\(result)): \(sqlite3_errmsg(db).flatMap { String(cString: $0) } ?? "")")
+            }
+            return false
+        }
+        return changed > 0
     }
 
     @discardableResult

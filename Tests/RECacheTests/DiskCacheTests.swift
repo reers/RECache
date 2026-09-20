@@ -160,6 +160,24 @@ struct DiskCacheTests {
         #expect(back?.count == 2048)
     }
 
+    @Test func largeValueUpdatedToSmallRemovesGeneratedFile() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Data>(
+            path: dir,
+            transformer: .data(),
+            inlineThreshold: 100
+        )!
+        let dataPath = (dir as NSString).appendingPathComponent("data")
+        let smallBlob = Data(repeating: 0x01, count: 16)
+
+        try cache.set(Data(repeating: 0xAB, count: 2048), forKey: "switch")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dataPath).count == 1)
+
+        try cache.set(smallBlob, forKey: "switch")
+        #expect(try cache.value(forKey: "switch") == smallBlob)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dataPath).isEmpty)
+    }
+
     // MARK: - Async API
 
     @Test func asyncRoundtrip() async throws {
@@ -337,6 +355,12 @@ struct DiskCacheTests {
         cache.fileNameProvider = { _ in "" }
         try cache.set(Data(repeating: 0x01, count: 200), forKey: "k")
         #expect(try cache.value(forKey: "k")?.count == 200)
+
+        let dataPath = (dir as NSString).appendingPathComponent("data")
+        let filenames = try FileManager.default.contentsOfDirectory(atPath: dataPath)
+        #expect(filenames.count == 1)
+        // md5("k") — default filename must stay MD5-compatible with existing caches.
+        #expect(filenames.first == "8ce4b16b22b58894aa86c421e8759df3")
     }
 
     // MARK: - Trim / removeExpired / totalCost
