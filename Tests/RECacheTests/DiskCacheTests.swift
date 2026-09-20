@@ -160,6 +160,24 @@ struct DiskCacheTests {
         #expect(back?.count == 2048)
     }
 
+    @Test func largeValueUpdatedToSmallRemovesGeneratedFile() throws {
+        let dir = Self.makeTempDir(); defer { Self.cleanup(dir) }
+        let cache = DiskCache<String, Data>(
+            path: dir,
+            transformer: .data(),
+            inlineThreshold: 100
+        )!
+        let dataPath = (dir as NSString).appendingPathComponent("data")
+        let smallBlob = Data(repeating: 0x01, count: 16)
+
+        try cache.set(Data(repeating: 0xAB, count: 2048), forKey: "switch")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dataPath).count == 1)
+
+        try cache.set(smallBlob, forKey: "switch")
+        #expect(try cache.value(forKey: "switch") == smallBlob)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dataPath).isEmpty)
+    }
+
     // MARK: - Async API
 
     @Test func asyncRoundtrip() async throws {

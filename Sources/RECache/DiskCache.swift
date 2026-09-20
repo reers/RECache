@@ -561,8 +561,9 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         let payload: Data = try transformer.encode(value)
 
         let k = stringKey(for: key)
+        let storageType = kv?.type
         var fname: String?
-        if kv?.type != .sqlite {
+        if storageType != .sqlite {
             if UInt(payload.count) > inlineThreshold {
                 fname = filename(for: key)
             }
