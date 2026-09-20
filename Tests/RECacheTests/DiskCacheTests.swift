@@ -337,6 +337,13 @@ struct DiskCacheTests {
         cache.fileNameProvider = { _ in "" }
         try cache.set(Data(repeating: 0x01, count: 200), forKey: "k")
         #expect(try cache.value(forKey: "k")?.count == 200)
+
+        let dataPath = (dir as NSString).appendingPathComponent("data")
+        let filenames = try FileManager.default.contentsOfDirectory(atPath: dataPath)
+        let hexDigits = Set("0123456789abcdef")
+        #expect(filenames.count == 1)
+        #expect(filenames.first?.count == 32)
+        #expect(filenames.first?.allSatisfy { hexDigits.contains($0) } == true)
     }
 
     // MARK: - Trim / removeExpired / totalCost
