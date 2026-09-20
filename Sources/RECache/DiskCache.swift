@@ -442,13 +442,15 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
     internal func _contains(_ key: Key) -> Bool {
         if isKeyInvalid(key) { return false }
         let k = stringKey(for: key)
-        let now = Date()
 
         os_unfair_lock_lock(lock)
         let item = kv?.getItemInfo(forKey: k)
         os_unfair_lock_unlock(lock)
 
         guard let item else { return false }
+        if case .never = expiration { return true }
+
+        let now = Date()
         let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
         if expiration.isExpired(writtenAt: writeDate, now: now) {
             os_unfair_lock_lock(lock)
@@ -468,6 +470,9 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         os_unfair_lock_unlock(lock)
 
         guard let item, !item.value.isEmpty else { return nil }
+        if case .never = expiration {
+            return try transformer.decode(item.value)
+        }
 
         let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
         if expiration.isExpired(writtenAt: writeDate, now: Date()) {
@@ -497,6 +502,10 @@ public final class DiskCache<Key: Hashable & Sendable, Value: Sendable>: @unchec
         os_unfair_lock_unlock(lock)
 
         guard let item, !item.value.isEmpty else { return nil }
+        if case .never = expiration {
+            let value = try transformer.decode(item.value)
+            return (value, item.extendedData)
+        }
 
         let writeDate = Date(timeIntervalSince1970: TimeInterval(item.modTime))
         if expiration.isExpired(writtenAt: writeDate, now: Date()) {
